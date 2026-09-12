@@ -55,7 +55,7 @@
       },
       "device_names": {
         "title": "Tracked Device Names",
-        "description": "Set friendly names for the selected devices (e.g., Vitaly's Phone, Laptop, etc.):"
+        "description": "Set friendly names for the selected devices (e.g., Vitaly's Phone, Laptop, etc.):\n\n{device_summary}"
       }
     }
   }

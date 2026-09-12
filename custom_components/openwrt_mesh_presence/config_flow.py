@@ -189,6 +189,7 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
         super().__init__()
         self._options: dict[str, Any] = {}
         self._target_macs: list[str] = []
+        self._field_to_mac: dict[str, str] = {}
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Step 1: Select tracked devices from discovered list, enter manual MACs, set intervals."""
@@ -278,44 +279,68 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(step_id="init", data_schema=schema)
 
     async def async_step_device_names(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Step 2: Assign friendly names for each selected device."""
+        """Step 2: Assign friendly names for each selected device with full network context."""
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
         current_options = self.config_entry.options or {}
         existing_names: dict[str, str] = dict(current_options.get(CONF_DEVICE_NAMES, {}))
 
         if user_input is not None:
             updated_names: dict[str, str] = dict(existing_names)
-            for mac in self._target_macs:
-                field_key = f"name_{mac.replace(':', '_')}"
-                val = str(user_input.get(field_key, "")).strip()
-                if val:
-                    updated_names[mac] = val
+            for field_key, val in user_input.items():
+                mac = self._field_to_mac.get(field_key)
+                if not mac:
+                    # Fallback: extract MAC from field key prefix
+                    mac = normalize_mac(str(field_key)[:17])
+                if mac:
+                    name_str = str(val).strip()
+                    if name_str:
+                        updated_names[mac] = name_str
+                    elif mac in updated_names:
+                        del updated_names[mac]
             self._options[CONF_DEVICE_NAMES] = updated_names
             return self.async_create_entry(title="", data=self._options)
 
-        # Build schema with a dedicated text field for each tracked device
+        self._field_to_mac.clear()
         schema_dict: dict[Any, Any] = {}
+        summary_items: list[str] = []
+
         for mac in self._target_macs:
-            field_key = f"name_{mac.replace(':', '_')}"
+            hint = coordinator.get_device_hint(mac) if coordinator else {}
+            dhcp_name = hint.get("name") or ""
+            ip = hint.get("ip") or ""
+
+            # Lookup active connection details from discovered info
+            disc = coordinator._discovered_info.get(mac, {}) if coordinator else {}
+            ap = disc.get("ap") or ""
+            rssi = disc.get("signal")
 
             # 1. Custom name if previously set
-            default_val = existing_names.get(mac, "")
+            saved_name = existing_names.get(mac, "")
+            # 2. Default value for input field: saved -> dhcp -> fallback
+            default_val = saved_name or dhcp_name or f"Устройство {mac[-5:]}"
 
-            # 2. DHCP / ARP hostname if available
-            hint = ""
-            if coordinator:
-                hint_data = coordinator._discovered_info.get(mac, {})
-                hint = hint_data.get("hostname") or ""
+            # 3. Create clear human-readable field label
+            display_title = dhcp_name or saved_name or (f"IP: {ip}" if ip else f"Устройство {mac[-5:]}")
+            field_label = f"{mac} — {display_title}"
+            self._field_to_mac[field_label] = mac
 
-            if not default_val:
-                default_val = hint or f"Устройство {mac[-5:]}"
-
-            schema_dict[vol.Optional(field_key, default=default_val)] = TextSelector(
+            schema_dict[vol.Optional(field_label, default=default_val)] = TextSelector(
                 TextSelectorConfig()
             )
+
+            # Build summary line for the header
+            details: list[str] = []
+            if ip:
+                details.append(f"IP: {ip}")
+            if ap:
+                rssi_str = f", {rssi} dBm" if rssi is not None else ""
+                details.append(f"{ap}{rssi_str}")
+            details_str = f" ({', '.join(details)})" if details else ""
+            summary_items.append(f"• **{mac}**: {display_title}{details_str}")
 
         schema = vol.Schema(schema_dict)
         return self.async_show_form(
             step_id="device_names",
             data_schema=schema,
+            description_placeholders={"device_summary": "\n".join(summary_items)},
         )

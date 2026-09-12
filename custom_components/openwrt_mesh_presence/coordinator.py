@@ -148,13 +148,31 @@ class OpenWrtMeshCoordinator(DataUpdateCoordinator[MeshData]):
         """Return debounce grace period in seconds."""
         return self.entry.options.get(CONF_ROAMING_GRACE_PERIOD, DEFAULT_ROAMING_GRACE_PERIOD)
 
+    def get_device_hint(self, mac: str) -> dict[str, Any]:
+        """Look up device hostname and IP across all mesh nodes (Master router DHCP table)."""
+        norm = normalize_mac(mac)
+        if not norm:
+            return {}
+        # 1. Search host_hints across all nodes
+        for client in self.clients:
+            if norm in client.host_hints:
+                hint = client.host_hints[norm]
+                if hint.get("name") or hint.get("ip"):
+                    return hint
+        # 2. Check discovered cache
+        if norm in self._discovered_info:
+            info = self._discovered_info[norm]
+            return {"name": info.get("hostname"), "ip": info.get("ip")}
+        return {}
+
     def get_discovered_devices(self) -> dict[str, str]:
         """Return recently discovered MACs with rich labels for selection in Options Flow."""
         result: dict[str, str] = {}
         for mac in sorted(self._discovered_info.keys()):
             info = self._discovered_info[mac]
-            friendly = self.device_names.get(mac) or info.get("hostname")
-            ip = info.get("ip") or ""
+            hint = self.get_device_hint(mac)
+            friendly = self.device_names.get(mac) or hint.get("name") or info.get("hostname")
+            ip = info.get("ip") or hint.get("ip") or ""
             ap = info.get("ap") or ""
             rssi = info.get("signal")
 
@@ -231,8 +249,8 @@ class OpenWrtMeshCoordinator(DataUpdateCoordinator[MeshData]):
                         current_active_clients[norm] = []
                     current_active_clients[norm].append(client_info)
 
-                    # Update discovered cache for UI dropdown
-                    hint = client.host_hints.get(norm, {})
+                    # Update discovered cache for UI dropdown using network-wide hints
+                    hint = self.get_device_hint(norm) or client.host_hints.get(norm, {})
                     self._discovered_info[norm] = {
                         "hostname": hint.get("name"),
                         "ip": hint.get("ip"),
@@ -274,8 +292,9 @@ class OpenWrtMeshCoordinator(DataUpdateCoordinator[MeshData]):
             if not self.is_device_tracked(mac):
                 continue
 
-            friendly_name = self.device_names.get(mac) or self._discovered_info.get(mac, {}).get("hostname") or f"Device {mac[-8:]}"
-            ip = self._discovered_info.get(mac, {}).get("ip")
+            hint = self.get_device_hint(mac)
+            friendly_name = self.device_names.get(mac) or hint.get("name") or self._discovered_info.get(mac, {}).get("hostname") or f"Device {mac[-8:]}"
+            ip = hint.get("ip") or self._discovered_info.get(mac, {}).get("ip")
 
             if mac not in self._devices:
                 self._devices[mac] = DeviceState(
