@@ -27,7 +27,6 @@ from homeassistant.helpers.selector import (
 from .client import OpenWrtAuthError, OpenWrtConnectionError, OpenWrtUbusClient
 from .const import (
     CONF_DEVICE_NAMES,
-    CONF_DEVICE_NAMES_TEXT,
     CONF_HOST,
     CONF_MANUAL_MACS,
     CONF_NAME,
@@ -159,7 +158,6 @@ class OpenWrtMeshConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_TRACKED_MACS: [],
                     CONF_MANUAL_MACS: "",
                     CONF_DEVICE_NAMES: {},
-                    CONF_DEVICE_NAMES_TEXT: "",
                 },
             )
 
@@ -184,10 +182,16 @@ class OpenWrtMeshConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options flow for OpenWrt Mesh Presence."""
+    """Handle options flow for OpenWrt Mesh Presence with dedicated device renaming."""
+
+    def __init__(self) -> None:
+        """Initialize options flow handler."""
+        super().__init__()
+        self._options: dict[str, Any] = {}
+        self._target_macs: list[str] = []
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Manage options: select tracked devices, enter manual MACs, set names."""
+        """Step 1: Select tracked devices from discovered list, enter manual MACs, set intervals."""
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
 
         discovered_dict: dict[str, str] = {}
@@ -198,12 +202,23 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
 
         if user_input is not None:
             selected_macs = [normalize_mac(m) for m in user_input.get(CONF_TRACKED_MACS, []) if normalize_mac(m)]
-            user_input[CONF_TRACKED_MACS] = selected_macs
-            return self.async_create_entry(title="", data=user_input)
+            manual_text = user_input.get(CONF_MANUAL_MACS, "") or ""
+            manual_set = parse_mac_list(manual_text)
+            all_target_macs = sorted(set(selected_macs) | manual_set)
+
+            self._options = dict(current_options)
+            self._options.update(user_input)
+            self._options[CONF_TRACKED_MACS] = selected_macs
+            self._target_macs = all_target_macs
+
+            # If there are devices to rename, proceed to Step 2
+            if all_target_macs:
+                return await self.async_step_device_names()
+
+            return self.async_create_entry(title="", data=self._options)
 
         current_macs = current_options.get(CONF_TRACKED_MACS, []) or []
         current_manual = current_options.get(CONF_MANUAL_MACS, "") or ""
-        current_names_text = current_options.get(CONF_DEVICE_NAMES_TEXT, "") or ""
         current_poll = current_options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL)
         current_grace = current_options.get(CONF_ROAMING_GRACE_PERIOD, DEFAULT_ROAMING_GRACE_PERIOD)
 
@@ -235,10 +250,6 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
                     CONF_MANUAL_MACS,
                     default=current_manual,
                 ): TextSelector(TextSelectorConfig(multiline=True)),
-                vol.Optional(
-                    CONF_DEVICE_NAMES_TEXT,
-                    default=current_names_text,
-                ): TextSelector(TextSelectorConfig(multiline=True)),
                 vol.Required(
                     CONF_POLL_INTERVAL,
                     default=current_poll,
@@ -265,3 +276,46 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
         )
 
         return self.async_show_form(step_id="init", data_schema=schema)
+
+    async def async_step_device_names(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Step 2: Assign friendly names for each selected device."""
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
+        current_options = self.config_entry.options or {}
+        existing_names: dict[str, str] = dict(current_options.get(CONF_DEVICE_NAMES, {}))
+
+        if user_input is not None:
+            updated_names: dict[str, str] = dict(existing_names)
+            for mac in self._target_macs:
+                field_key = f"name_{mac.replace(':', '_')}"
+                val = str(user_input.get(field_key, "")).strip()
+                if val:
+                    updated_names[mac] = val
+            self._options[CONF_DEVICE_NAMES] = updated_names
+            return self.async_create_entry(title="", data=self._options)
+
+        # Build schema with a dedicated text field for each tracked device
+        schema_dict: dict[Any, Any] = {}
+        for mac in self._target_macs:
+            field_key = f"name_{mac.replace(':', '_')}"
+
+            # 1. Custom name if previously set
+            default_val = existing_names.get(mac, "")
+
+            # 2. DHCP / ARP hostname if available
+            hint = ""
+            if coordinator:
+                hint_data = coordinator._discovered_info.get(mac, {})
+                hint = hint_data.get("hostname") or ""
+
+            if not default_val:
+                default_val = hint or f"Устройство {mac[-5:]}"
+
+            schema_dict[vol.Optional(field_key, default=default_val)] = TextSelector(
+                TextSelectorConfig()
+            )
+
+        schema = vol.Schema(schema_dict)
+        return self.async_show_form(
+            step_id="device_names",
+            data_schema=schema,
+        )

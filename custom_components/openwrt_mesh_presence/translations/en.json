@@ -49,10 +49,13 @@
         "data": {
           "tracked_macs": "Select from discovered devices",
           "manual_macs": "Additional MAC addresses (manual, comma or space separated)",
-          "device_names_text": "Device friendly names (format MAC=Name, comma separated)",
           "poll_interval": "Router poll interval (seconds)",
           "roaming_grace_period": "AP roaming grace period (seconds)"
         }
+      },
+      "device_names": {
+        "title": "Tracked Device Names",
+        "description": "Set friendly names for the selected devices (e.g., Vitaly's Phone, Laptop, etc.):"
       }
     }
   }
