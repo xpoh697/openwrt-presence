@@ -38,9 +38,10 @@ async def async_setup_entry(
     # 1. Total mesh clients sensor
     entities: list[SensorEntity] = [OpenWrtTotalClientsSensor(coordinator)]
 
-    # 2. Router diagnostic sensors (clients per AP)
+    # 2. Router diagnostic sensors (all clients and tracked clients per AP)
     for client in coordinator.clients:
         entities.append(OpenWrtNodeClientsSensor(coordinator, client.node_name))
+        entities.append(OpenWrtNodeTrackedClientsSensor(coordinator, client.node_name))
 
     async_add_entities(entities)
 
@@ -156,6 +157,65 @@ class OpenWrtNodeClientsSensor(CoordinatorEntity[OpenWrtMeshCoordinator], Sensor
             "host": node.host,
             "is_online": node.is_online,
             "last_error": node.last_error,
+        }
+
+
+class OpenWrtNodeTrackedClientsSensor(CoordinatorEntity[OpenWrtMeshCoordinator], SensorEntity):
+    """Sensor reporting the count of tracked devices connected to a specific OpenWrt mesh node."""
+
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:account-multiple-check"
+
+    def __init__(self, coordinator: OpenWrtMeshCoordinator, node_name: str) -> None:
+        """Initialize node tracked clients sensor."""
+        super().__init__(coordinator)
+        self._node_name = node_name
+        clean_name = self._node_name.replace(" ", "_").lower()
+        self._attr_unique_id = f"openwrt_node_tracked_{clean_name}_{coordinator.entry.entry_id}"
+        self._attr_name = f"{self._node_name} Отслеживаемых устройств"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Link to the single unified device."""
+        return _get_shared_device_info(self.coordinator)
+
+    @property
+    def _current_node(self) -> NodeState | None:
+        """Get node state from coordinator."""
+        return self.coordinator.data.nodes.get(self._node_name)
+
+    @property
+    def native_value(self) -> int:
+        """Return count of tracked devices currently connected to this AP."""
+        node = self._current_node
+        if not node or not node.is_online:
+            return 0
+
+        count = 0
+        for mac, dev in self.coordinator.data.devices.items():
+            if dev.is_home and dev.connected_ap == self._node_name and self.coordinator.is_device_tracked(mac):
+                count += 1
+        return count
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return attributes including list of connected device names."""
+        node = self._current_node
+        device_names: list[str] = []
+        macs: list[str] = []
+
+        if node and node.is_online:
+            for mac, dev in self.coordinator.data.devices.items():
+                if dev.is_home and dev.connected_ap == self._node_name and self.coordinator.is_device_tracked(mac):
+                    device_names.append(dev.name)
+                    macs.append(mac)
+
+        return {
+            "devices": device_names,
+            "mac_addresses": macs,
+            "host": node.host if node else None,
+            "is_online": node.is_online if node else False,
         }
 
 
