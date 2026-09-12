@@ -8,7 +8,7 @@ from typing import Any
 
 import aiohttp
 
-from .const import DEFAULT_REQUEST_TIMEOUT
+from .const import DEFAULT_REQUEST_TIMEOUT, normalize_mac
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,6 +57,7 @@ class OpenWrtUbusClient:
         self._logged_in: bool = False
         self._known_interfaces: list[str] = []
         self._interface_meta: dict[str, dict[str, Any]] = {}
+        self._host_hints: dict[str, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -68,6 +69,11 @@ class OpenWrtUbusClient:
     def host(self) -> str:
         """Return router host."""
         return self._host
+
+    @property
+    def host_hints(self) -> dict[str, dict[str, Any]]:
+        """Return cached host hints (hostnames & IP)."""
+        return self._host_hints
 
     async def _post_json(self, payload: dict[str, Any] | list[dict[str, Any]]) -> Any:
         """Send raw JSON-RPC POST request."""
@@ -184,100 +190,153 @@ class OpenWrtUbusClient:
 
     async def update_wireless_interfaces(self) -> None:
         """Discover wireless interfaces and BSSIDs on this router."""
+        interfaces: list[str] = []
+        meta: dict[str, dict[str, Any]] = {}
+
+        # 1. Primary discovery: luci-rpc getWirelessDevices (cleanest, reliable on OpenWrt 25+)
         try:
-            status = await self.call("network.wireless", "status")
-            if not status or not isinstance(status, dict):
-                return
-
-            interfaces: list[str] = []
-            meta: dict[str, dict[str, Any]] = {}
-
-            for radio_name, radio_info in status.items():
-                if not isinstance(radio_info, dict):
-                    continue
-                vifs = radio_info.get("interfaces", [])
-                for vif in vifs:
-                    if not isinstance(vif, dict):
+            wdevs = await self.call("luci-rpc", "getWirelessDevices")
+            if wdevs and isinstance(wdevs, dict):
+                for radio_name, rdata in wdevs.items():
+                    if not isinstance(rdata, dict):
                         continue
-                    ifname = vif.get("ifname")
-                    config = vif.get("config", {})
-                    data = vif.get("data", {})
-                    ssid = config.get("ssid") or data.get("ssid") or "Unknown"
-                    bssid = data.get("bssid") or config.get("bssid")
-
-                    if ifname:
-                        interfaces.append(ifname)
-                        meta[ifname] = {
-                            "radio": radio_name,
-                            "ssid": ssid,
-                            "bssid": bssid.upper() if bssid else None,
-                        }
-
-            if interfaces:
-                self._known_interfaces = interfaces
-                self._interface_meta = meta
-                _LOGGER.debug("[%s] Discovered interfaces: %s", self._node_name, interfaces)
+                    for iface in rdata.get("interfaces", []):
+                        if not isinstance(iface, dict):
+                            continue
+                        ifname = iface.get("ifname")
+                        cfg = iface.get("config", {})
+                        ssid = cfg.get("ssid") or iface.get("ssid") or "OpenWrt-WiFi"
+                        bssid = cfg.get("bssid") or iface.get("bssid")
+                        if ifname:
+                            interfaces.append(ifname)
+                            meta[ifname] = {
+                                "radio": radio_name,
+                                "ssid": ssid,
+                                "bssid": bssid.upper() if bssid else None,
+                            }
         except Exception as err:
-            _LOGGER.debug("[%s] Error discovering wireless interfaces: %s", self._node_name, err)
+            _LOGGER.debug("[%s] luci-rpc getWirelessDevices error: %s", self._node_name, err)
+
+        # 2. Fallback: network.device status
+        if not interfaces:
+            try:
+                devs = await self.call("network.device", "status")
+                if devs and isinstance(devs, dict):
+                    for dev_name, dev_info in devs.items():
+                        if isinstance(dev_info, dict) and dev_info.get("type") == "Network device":
+                            if "wlan" in dev_name or "phy" in dev_name or "ap" in dev_name:
+                                interfaces.append(dev_name)
+                                meta[dev_name] = {"radio": "unknown", "ssid": "WiFi", "bssid": None}
+            except Exception as err:
+                _LOGGER.debug("[%s] network.device status error: %s", self._node_name, err)
+
+        # 3. Last resort fallback
+        if not interfaces:
+            interfaces = ["phy0-ap0", "phy1-ap0", "wlan0", "wlan1"]
+
+        self._known_interfaces = interfaces
+        self._interface_meta = meta
+        _LOGGER.debug("[%s] Discovered wireless interfaces: %s", self._node_name, interfaces)
+
+        # Also fetch host hints (DHCP / ARP cache)
+        await self.update_host_hints()
+
+    async def update_host_hints(self) -> None:
+        """Fetch host hints to resolve friendly hostnames and IP addresses."""
+        try:
+            hints = await self.call("luci-rpc", "getHostHints")
+            if hints and isinstance(hints, dict):
+                normalized_hints: dict[str, dict[str, Any]] = {}
+                for raw_mac, info in hints.items():
+                    norm = normalize_mac(raw_mac)
+                    if norm and isinstance(info, dict):
+                        name = info.get("name")
+                        # Strip .lan or .local suffix
+                        if name:
+                            name = name.removesuffix(".lan").removesuffix(".local")
+                        ips = info.get("ipaddrs", [])
+                        ip = ips[0] if ips else None
+                        normalized_hints[norm] = {"name": name, "ip": ip}
+                self._host_hints = normalized_hints
+        except Exception as err:
+            _LOGGER.debug("[%s] getHostHints error: %s", self._node_name, err)
 
     async def get_clients(self) -> dict[str, dict[str, Any]]:
-        """Fetch all connected wireless clients from this node."""
+        """Fetch all connected wireless clients from this node concurrently."""
         if not self._known_interfaces:
             await self.update_wireless_interfaces()
 
         clients: dict[str, dict[str, Any]] = {}
 
-        if not self._known_interfaces:
-            # Fallback if interface discovery is empty: try default names
-            self._known_interfaces = ["wlan0", "wlan1"]
-
-        # 1. First attempt: call hostapd.<ifname> get_clients (fastest, kernel-level)
-        for ifname in self._known_interfaces:
+        # Fetch iwinfo assoclist for all interfaces concurrently
+        async def _query_iface(ifname: str) -> list[dict[str, Any]]:
             meta = self._interface_meta.get(ifname, {})
-            try:
-                res = await self.call(f"hostapd.{ifname}", "get_clients")
-                if res and isinstance(res, dict) and "clients" in res:
-                    for mac, data in res["clients"].items():
-                        if not isinstance(data, dict):
-                            continue
-                        clean_mac = mac.upper()
-                        # Verify station is actually authorized/associated
-                        if data.get("authorized", True) and data.get("assoc", True):
-                            signal = data.get("signal", 0)
-                            clients[clean_mac] = {
-                                "mac": clean_mac,
-                                "signal": signal,
-                                "interface": ifname,
-                                "ssid": meta.get("ssid"),
-                                "bssid": meta.get("bssid"),
-                                "node_name": self._node_name,
-                                "host": self._host,
-                            }
-                    continue
-            except Exception as err:
-                _LOGGER.debug("[%s] hostapd.%s get_clients failed: %s", self._node_name, ifname, err)
-
-            # 2. Second attempt / Fallback: iwinfo assoclist
+            # Try iwinfo assoclist
             try:
                 iw_res = await self.call("iwinfo", "assoclist", {"device": ifname})
                 if iw_res and isinstance(iw_res, dict) and "results" in iw_res:
-                    for entry in iw_res["results"]:
+                    entries = iw_res["results"]
+                    parsed = []
+                    for entry in entries:
                         if not isinstance(entry, dict):
                             continue
                         mac = entry.get("mac")
-                        if mac:
-                            clean_mac = mac.upper()
-                            signal = entry.get("signal", 0)
-                            clients[clean_mac] = {
-                                "mac": clean_mac,
-                                "signal": signal,
-                                "interface": ifname,
-                                "ssid": meta.get("ssid"),
-                                "bssid": meta.get("bssid"),
-                                "node_name": self._node_name,
-                                "host": self._host,
-                            }
+                        norm = normalize_mac(mac)
+                        if norm:
+                            parsed.append(
+                                {
+                                    "mac": norm,
+                                    "signal": entry.get("signal", 0),
+                                    "noise": entry.get("noise"),
+                                    "connected_time": entry.get("connected_time", 0),
+                                    "interface": ifname,
+                                    "ssid": meta.get("ssid"),
+                                    "bssid": meta.get("bssid"),
+                                    "node_name": self._node_name,
+                                    "host": self._host,
+                                }
+                            )
+                    return parsed
             except Exception as err:
-                _LOGGER.debug("[%s] iwinfo %s assoclist failed: %s", self._node_name, ifname, err)
+                _LOGGER.debug("[%s] iwinfo %s assoclist error: %s", self._node_name, ifname, err)
+
+            # Fallback to hostapd get_clients
+            try:
+                res = await self.call(f"hostapd.{ifname}", "get_clients")
+                if res and isinstance(res, dict) and "clients" in res:
+                    parsed = []
+                    for mac, data in res["clients"].items():
+                        if isinstance(data, dict) and data.get("authorized", True):
+                            norm = normalize_mac(mac)
+                            if norm:
+                                parsed.append(
+                                    {
+                                        "mac": norm,
+                                        "signal": data.get("signal", 0),
+                                        "noise": None,
+                                        "connected_time": data.get("connected_time", 0),
+                                        "interface": ifname,
+                                        "ssid": meta.get("ssid"),
+                                        "bssid": meta.get("bssid"),
+                                        "node_name": self._node_name,
+                                        "host": self._host,
+                                    }
+                                )
+                    return parsed
+            except Exception as err:
+                _LOGGER.debug("[%s] hostapd.%s get_clients error: %s", self._node_name, ifname, err)
+
+            return []
+
+        tasks = [_query_iface(ifname) for ifname in self._known_interfaces]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for res in results:
+            if isinstance(res, list):
+                for client_info in res:
+                    mac = client_info["mac"]
+                    # If client appears on both 2.4 and 5GHz on the same router, keep higher signal
+                    if mac not in clients or client_info.get("signal", -100) > clients[mac].get("signal", -100):
+                        clients[mac] = client_info
 
         return clients

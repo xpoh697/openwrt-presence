@@ -3,40 +3,40 @@
     "step": {
       "user": {
         "title": "Add OpenWrt Access Point",
-        "description": "Enter connection details for the first access point (Master AP).",
+        "description": "Enter connection parameters for the first router (Master AP).",
         "data": {
-          "name": "Access Point Name (e.g. Living Room AP)",
+          "name": "AP friendly name (e.g., Living Room AP)",
           "host": "Router IP address",
           "port": "Port",
-          "username": "LuCI Username",
+          "username": "LuCI username",
           "password": "Password",
           "ssl": "Use HTTPS (SSL)",
-          "verify_ssl": "Verify SSL Certificate"
+          "verify_ssl": "Verify SSL certificate"
         }
       },
       "add_router": {
         "title": "Add Additional Mesh Node",
-        "description": "Enter connection details for the next mesh router.",
+        "description": "Enter connection parameters for the next mesh access point.",
         "data": {
-          "name": "Access Point Name (e.g. Bedroom AP)",
+          "name": "AP friendly name (e.g., Bedroom AP)",
           "host": "Router IP address",
           "port": "Port",
-          "username": "LuCI Username",
+          "username": "LuCI username",
           "password": "Password",
           "ssl": "Use HTTPS (SSL)",
-          "verify_ssl": "Verify SSL Certificate"
+          "verify_ssl": "Verify SSL certificate"
         }
       },
       "add_more": {
-        "title": "Mesh Nodes",
-        "description": "Added nodes: {count} ({added_nodes}). Do you want to add another node to this mesh network?",
+        "title": "Mesh Network Nodes",
+        "description": "Added nodes: {count} ({added_nodes}). Do you want to add another access point to this mesh network?",
         "data": {
           "add_another": "Add another access point"
         }
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to router. Check IP address and network.",
+      "cannot_connect": "Could not connect to router. Check IP address and network availability.",
       "invalid_auth": "Invalid LuCI username or password.",
       "unknown": "Unexpected error."
     }
@@ -44,12 +44,14 @@
   "options": {
     "step": {
       "init": {
-        "title": "OpenWrt Mesh Presence Settings",
+        "title": "OpenWrt Mesh Presence Options",
+        "description": "Select devices to track from discovered network clients or enter desired MAC addresses manually.",
         "data": {
-          "tracking_mode": "Tracking Mode",
-          "tracked_macs": "Tracked Devices",
-          "poll_interval": "Router Poll Interval (sec)",
-          "roaming_grace_period": "Roaming Grace Period (sec)"
+          "tracked_macs": "Select from discovered devices",
+          "manual_macs": "Additional MAC addresses (manual, comma or space separated)",
+          "device_names_text": "Device friendly names (format MAC=Name, comma separated)",
+          "poll_interval": "Router poll interval (seconds)",
+          "roaming_grace_period": "AP roaming grace period (seconds)"
         }
       }
     }

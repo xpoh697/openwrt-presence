@@ -11,6 +11,7 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -29,8 +30,8 @@ async def async_setup_entry(
     coordinator: OpenWrtMeshCoordinator = hass.data[DOMAIN][entry.entry_id]
 
     entities: list[BinarySensorEntity] = [
-        OpenWrtNodeStatusBinarySensor(coordinator, node_name)
-        for node_name in coordinator.data.nodes
+        OpenWrtNodeStatusBinarySensor(coordinator, client.node_name)
+        for client in coordinator.clients
     ]
     async_add_entities(entities)
 
@@ -46,8 +47,21 @@ class OpenWrtNodeStatusBinarySensor(CoordinatorEntity[OpenWrtMeshCoordinator], B
         super().__init__(coordinator)
         self._node_name = node_name
         clean_name = self._node_name.replace(" ", "_").lower()
-        self._attr_unique_id = f"openwrt_node_status_{clean_name}"
+        self._attr_unique_id = f"openwrt_node_status_{clean_name}_{coordinator.entry.entry_id}"
         self._attr_name = f"{self._node_name} Status"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Link to the single unified device."""
+        first_host = self.coordinator.clients[0].host if self.coordinator.clients else None
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.coordinator.entry.entry_id)},
+            name="OpenWrt Mesh Presence",
+            manufacturer="OpenWrt",
+            model="Mesh Presence Hub",
+            sw_version="1.0.0",
+            configuration_url=f"http://{first_host}" if first_host else None,
+        )
 
     @property
     def _current_node(self) -> NodeState | None:
@@ -68,5 +82,6 @@ class OpenWrtNodeStatusBinarySensor(CoordinatorEntity[OpenWrtMeshCoordinator], B
             return {}
         return {
             "host": node.host,
+            "clients_count": node.clients_count,
             "last_error": node.last_error,
         }

@@ -9,6 +9,8 @@ from homeassistant.components.device_tracker import SourceType
 from homeassistant.components.device_tracker.config_entry import ScannerEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -30,9 +32,9 @@ async def async_setup_entry(
 
     @callback
     def _update_entities(new_macs: list[str] | None = None) -> None:
-        """Add new device trackers dynamically as devices are discovered."""
+        """Add new device trackers dynamically as devices are configured."""
         new_entities: list[OpenWrtDeviceTracker] = []
-        for mac, dev in coordinator.data.devices.items():
+        for mac in coordinator.data.devices:
             if mac not in tracked_entities and coordinator.is_device_tracked(mac):
                 entity = OpenWrtDeviceTracker(coordinator, mac)
                 tracked_entities[mac] = entity
@@ -44,6 +46,19 @@ async def async_setup_entry(
     coordinator.register_new_device_callback(_update_entities)
     _update_entities()
 
+    # Clean up device trackers for devices that were removed from tracking
+    ent_reg = er.async_get(hass)
+    entries = er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+    for reg_entry in entries:
+        if reg_entry.domain == "device_tracker":
+            unique_id = reg_entry.unique_id
+            if unique_id.startswith("openwrt_tracker_"):
+                clean_mac = unique_id.replace("openwrt_tracker_", "")
+                mac = clean_mac.replace("_", ":").upper()
+                if not coordinator.is_device_tracked(mac):
+                    _LOGGER.info("Removing obsolete tracker entity %s for untracked MAC %s", reg_entry.entity_id, mac)
+                    ent_reg.async_remove(reg_entry.entity_id)
+
 
 class OpenWrtDeviceTracker(CoordinatorEntity[OpenWrtMeshCoordinator], ScannerEntity):
     """Represents a wireless client tracked across the OpenWrt mesh."""
@@ -54,13 +69,31 @@ class OpenWrtDeviceTracker(CoordinatorEntity[OpenWrtMeshCoordinator], ScannerEnt
         """Initialize the device tracker entity."""
         super().__init__(coordinator)
         self._mac = mac.upper()
-        self._attr_unique_id = f"openwrt_mesh_tracker_{self._mac.replace(':', '_').lower()}"
-        self._attr_name = self._current_device.name if self._current_device else f"Device {self._mac[-8:]}"
+        self._attr_unique_id = f"openwrt_tracker_{self._mac.replace(':', '_').lower()}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Link to the single unified device."""
+        first_host = self.coordinator.clients[0].host if self.coordinator.clients else None
+        return DeviceInfo(
+            identifiers={(DOMAIN, self.coordinator.entry.entry_id)},
+            name="OpenWrt Mesh Presence",
+            manufacturer="OpenWrt",
+            model="Mesh Presence Hub",
+            sw_version="1.0.0",
+            configuration_url=f"http://{first_host}" if first_host else None,
+        )
 
     @property
     def _current_device(self) -> DeviceState | None:
         """Get current state of the device from coordinator."""
         return self.coordinator.data.devices.get(self._mac)
+
+    @property
+    def name(self) -> str:
+        """Return friendly name."""
+        dev = self._current_device
+        return dev.name if dev else f"Device {self._mac[-8:]}"
 
     @property
     def source_type(self) -> SourceType:
@@ -85,13 +118,20 @@ class OpenWrtDeviceTracker(CoordinatorEntity[OpenWrtMeshCoordinator], ScannerEnt
         return dev.name if dev else None
 
     @property
+    def ip_address(self) -> str | None:
+        """Return IP address of the device."""
+        dev = self._current_device
+        return dev.ip_address if dev else None
+
+    @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return device tracker attributes."""
         dev = self._current_device
         if not dev:
-            return {}
+            return {"mac": self._mac}
 
         return {
+            "mac": self._mac,
             "connected_ap": dev.connected_ap,
             "signal_strength_dbm": dev.signal,
             "ssid": dev.ssid,

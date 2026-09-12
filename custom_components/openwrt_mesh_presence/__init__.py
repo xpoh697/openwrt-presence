@@ -54,11 +54,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     coordinator = OpenWrtMeshCoordinator(
         hass=hass,
+        entry=entry,
         clients=clients,
-        options=entry.options,
     )
 
-    # Perform first refresh
+    # Perform initial coordinator refresh
     await coordinator.async_config_entry_first_refresh()
 
     hass.data[DOMAIN][entry.entry_id] = coordinator

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import aiohttp
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -17,7 +16,9 @@ import homeassistant.helpers.config_validation as cv
 from .client import OpenWrtAuthError, OpenWrtConnectionError, OpenWrtUbusClient
 from .const import (
     CONF_DEVICE_NAMES,
+    CONF_DEVICE_NAMES_TEXT,
     CONF_HOST,
+    CONF_MANUAL_MACS,
     CONF_NAME,
     CONF_PASSWORD,
     CONF_POLL_INTERVAL,
@@ -38,6 +39,8 @@ from .const import (
     DOMAIN,
     TRACK_MODE_ALL,
     TRACK_MODE_SELECTED,
+    normalize_mac,
+    parse_mac_list,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -143,7 +146,9 @@ class OpenWrtMeshConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_ROAMING_GRACE_PERIOD: DEFAULT_ROAMING_GRACE_PERIOD,
                     CONF_TRACKING_MODE: TRACK_MODE_SELECTED,
                     CONF_TRACKED_MACS: [],
+                    CONF_MANUAL_MACS: "",
                     CONF_DEVICE_NAMES: {},
+                    CONF_DEVICE_NAMES_TEXT: "",
                 },
             )
 
@@ -175,7 +180,7 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
         self.config_entry = config_entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Manage options: tracking modes, MAC selection, intervals."""
+        """Manage options: select tracked devices, enter manual MACs, set names."""
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
 
         discovered_dict: dict[str, str] = {}
@@ -185,34 +190,38 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
         current_options = self.config_entry.options
 
         if user_input is not None:
+            # Normalize and merge MACs
+            selected_macs = [normalize_mac(m) for m in user_input.get(CONF_TRACKED_MACS, []) if normalize_mac(m)]
+            user_input[CONF_TRACKED_MACS] = selected_macs
             return self.async_create_entry(title="", data=user_input)
 
-        current_mode = current_options.get(CONF_TRACKING_MODE, TRACK_MODE_SELECTED)
         current_macs = current_options.get(CONF_TRACKED_MACS, [])
+        current_manual = current_options.get(CONF_MANUAL_MACS, "")
+        current_names_text = current_options.get(CONF_DEVICE_NAMES_TEXT, "")
         current_poll = current_options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL)
         current_grace = current_options.get(CONF_ROAMING_GRACE_PERIOD, DEFAULT_ROAMING_GRACE_PERIOD)
 
-        # Make sure current tracked macs exist in options multi-select list
+        # Ensure all currently tracked macs appear in options list
         options_dict = dict(discovered_dict)
         for mac in current_macs:
-            if mac not in options_dict:
-                options_dict[mac] = mac
+            norm = normalize_mac(mac)
+            if norm and norm not in options_dict:
+                options_dict[norm] = norm
 
         schema = vol.Schema(
             {
-                vol.Required(
-                    CONF_TRACKING_MODE,
-                    default=current_mode,
-                ): vol.In(
-                    {
-                        TRACK_MODE_SELECTED: "Отслеживать только выбранные устройства",
-                        TRACK_MODE_ALL: "Отслеживать все обнаруженные устройства",
-                    }
-                ),
                 vol.Optional(
                     CONF_TRACKED_MACS,
                     default=current_macs,
                 ): cv.multi_select(options_dict),
+                vol.Optional(
+                    CONF_MANUAL_MACS,
+                    default=current_manual,
+                ): cv.string,
+                vol.Optional(
+                    CONF_DEVICE_NAMES_TEXT,
+                    default=current_names_text,
+                ): cv.string,
                 vol.Required(
                     CONF_POLL_INTERVAL,
                     default=current_poll,
