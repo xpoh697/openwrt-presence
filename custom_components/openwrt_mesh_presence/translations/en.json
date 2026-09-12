@@ -44,7 +44,14 @@
   "options": {
     "step": {
       "init": {
-        "title": "OpenWrt Mesh Presence Options",
+        "title": "OpenWrt Mesh Presence Settings",
+        "menu_options": {
+          "devices": "Tracked Devices & Timing",
+          "routers": "Manage Mesh Access Points (APs)"
+        }
+      },
+      "devices": {
+        "title": "Device Tracking Settings",
         "description": "Select devices to track from discovered network clients or enter desired MAC addresses manually.",
         "data": {
           "tracked_macs": "Select from discovered devices",
@@ -55,8 +62,66 @@
       },
       "device_names": {
         "title": "Tracked Device Names",
-        "description": "Set friendly names for the selected devices (e.g., Vitaly's Phone, Laptop, etc.):\n\n{device_summary}"
+        "description": "Set friendly names for each device (e.g., Vitaly's Phone, Laptop, etc.):\n\n{device_summary}"
+      },
+      "routers": {
+        "title": "Manage Mesh Access Points",
+        "menu_options": {
+          "router_add": "Add new access point",
+          "router_edit": "Edit access point parameters",
+          "router_remove": "Delete access point"
+        }
+      },
+      "router_add": {
+        "title": "Add Access Point",
+        "description": "Enter connection parameters for the new mesh access point.",
+        "data": {
+          "name": "AP friendly name (e.g., Kitchen AP)",
+          "host": "Router IP address",
+          "port": "Port",
+          "username": "LuCI username",
+          "password": "Password",
+          "ssl": "Use HTTPS (SSL)",
+          "verify_ssl": "Verify SSL certificate"
+        }
+      },
+      "router_edit": {
+        "title": "Select Access Point",
+        "description": "Select the access point you wish to edit.",
+        "data": {
+          "router_idx": "Access Point"
+        }
+      },
+      "router_edit_details": {
+        "title": "Edit Access Point Parameters",
+        "description": "Update connection settings for the selected access point. If password is unchanged, leave password empty.",
+        "data": {
+          "name": "AP friendly name",
+          "host": "Router IP address",
+          "port": "Port",
+          "username": "LuCI username",
+          "password": "Password (leave blank to keep current)",
+          "ssl": "Use HTTPS (SSL)",
+          "verify_ssl": "Verify SSL certificate"
+        }
+      },
+      "router_remove": {
+        "title": "Delete Access Point",
+        "description": "Select the access point to remove from the mesh network. Associated entities will be cleaned automatically.",
+        "data": {
+          "router_idx": "Access point to delete"
+        }
       }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to router. Check IP address and network availability.",
+      "invalid_auth": "Invalid LuCI username or password.",
+      "host_exists": "An access point with this IP address already exists.",
+      "name_exists": "An access point with this name already exists.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "cannot_remove_last_router": "Cannot delete the last access point in the mesh network."
     }
   }
 }

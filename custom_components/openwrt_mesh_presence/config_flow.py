@@ -8,8 +8,9 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.selector import (
@@ -56,6 +57,32 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
+async def async_test_router_connection(hass: HomeAssistant, data: dict[str, Any]) -> str | None:
+    """Test router credentials and connection."""
+    session = async_get_clientsession(hass, verify_ssl=data.get(CONF_VERIFY_SSL, False))
+    client = OpenWrtUbusClient(
+        session=session,
+        host=data[CONF_HOST],
+        port=data.get(CONF_PORT, DEFAULT_PORT),
+        username=data.get(CONF_USERNAME, DEFAULT_USERNAME),
+        password=data.get(CONF_PASSWORD, ""),
+        ssl=data.get(CONF_SSL, DEFAULT_SSL),
+        verify_ssl=data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL),
+        node_name=data.get(CONF_NAME, data[CONF_HOST]),
+    )
+    try:
+        await client.login()
+        await client.update_wireless_interfaces()
+        return None
+    except OpenWrtAuthError:
+        return "invalid_auth"
+    except OpenWrtConnectionError:
+        return "cannot_connect"
+    except Exception as err:
+        _LOGGER.exception("Unexpected error testing OpenWrt router: %s", err)
+        return "unknown"
+
+
 class OpenWrtMeshConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for OpenWrt Mesh Presence."""
 
@@ -65,37 +92,12 @@ class OpenWrtMeshConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Initialize flow state."""
         self._routers: list[dict[str, Any]] = []
 
-    async def _test_router_connection(self, data: dict[str, Any]) -> str | None:
-        """Test router credentials and connection."""
-        session = async_get_clientsession(self.hass, verify_ssl=data.get(CONF_VERIFY_SSL, False))
-        client = OpenWrtUbusClient(
-            session=session,
-            host=data[CONF_HOST],
-            port=data.get(CONF_PORT, DEFAULT_PORT),
-            username=data.get(CONF_USERNAME, DEFAULT_USERNAME),
-            password=data.get(CONF_PASSWORD, ""),
-            ssl=data.get(CONF_SSL, DEFAULT_SSL),
-            verify_ssl=data.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL),
-            node_name=data.get(CONF_NAME, data[CONF_HOST]),
-        )
-        try:
-            await client.login()
-            await client.update_wireless_interfaces()
-            return None
-        except OpenWrtAuthError:
-            return "invalid_auth"
-        except OpenWrtConnectionError:
-            return "cannot_connect"
-        except Exception as err:
-            _LOGGER.exception("Unexpected error testing OpenWrt router: %s", err)
-            return "unknown"
-
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Handle adding the first mesh router node."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            err = await self._test_router_connection(user_input)
+            err = await async_test_router_connection(self.hass, user_input)
             if err:
                 errors["base"] = err
             else:
@@ -121,7 +123,7 @@ class OpenWrtMeshConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            err = await self._test_router_connection(user_input)
+            err = await async_test_router_connection(self.hass, user_input)
             if err:
                 errors["base"] = err
             else:
@@ -182,7 +184,7 @@ class OpenWrtMeshConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options flow for OpenWrt Mesh Presence with dedicated device renaming."""
+    """Handle options flow for OpenWrt Mesh Presence with AP management and device renaming."""
 
     def __init__(self) -> None:
         """Initialize options flow handler."""
@@ -190,8 +192,16 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
         self._options: dict[str, Any] = {}
         self._target_macs: list[str] = []
         self._field_to_mac: dict[str, str] = {}
+        self._selected_router_idx: int | None = None
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Main options menu: Devices vs Routers."""
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["devices", "routers"],
+        )
+
+    async def async_step_devices(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Step 1: Select tracked devices from discovered list, enter manual MACs, set intervals."""
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
 
@@ -276,7 +286,7 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
             }
         )
 
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="devices", data_schema=schema)
 
     async def async_step_device_names(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Step 2: Assign friendly names for each selected device with full network context."""
@@ -344,3 +354,174 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
             data_schema=schema,
             description_placeholders={"device_summary": "\n".join(summary_items)},
         )
+
+    # ------------------------------------------------------------------
+    # MESH ROUTERS MANAGEMENT (ADD / EDIT / REMOVE)
+    # ------------------------------------------------------------------
+
+    async def async_step_routers(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Mesh routers management submenu."""
+        return self.async_show_menu(
+            step_id="routers",
+            menu_options=["router_add", "router_edit", "router_remove"],
+        )
+
+    async def async_step_router_add(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Add a new OpenWrt router to the mesh."""
+        errors: dict[str, str] = {}
+        current_routers = list(self.config_entry.data.get(CONF_ROUTERS, []))
+
+        if user_input is not None:
+            host = str(user_input.get(CONF_HOST, "")).strip()
+            name = str(user_input.get(CONF_NAME, "")).strip()
+
+            if any(r.get(CONF_HOST) == host for r in current_routers):
+                errors["base"] = "host_exists"
+            elif any(r.get(CONF_NAME) == name for r in current_routers):
+                errors["base"] = "name_exists"
+            else:
+                err = await async_test_router_connection(self.hass, user_input)
+                if err:
+                    errors["base"] = err
+                else:
+                    new_routers = current_routers + [user_input]
+                    new_data = dict(self.config_entry.data)
+                    new_data[CONF_ROUTERS] = new_routers
+                    self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+                    return self.async_create_entry(title="", data=self.config_entry.options)
+
+        next_idx = len(current_routers) + 1
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_NAME, default=f"AP {next_idx}"): cv.string,
+                vol.Required(CONF_HOST): cv.string,
+                vol.Required(CONF_PORT, default=DEFAULT_PORT): cv.port,
+                vol.Required(CONF_USERNAME, default=DEFAULT_USERNAME): cv.string,
+                vol.Required(CONF_PASSWORD, default=""): cv.string,
+                vol.Optional(CONF_SSL, default=DEFAULT_SSL): cv.boolean,
+                vol.Optional(CONF_VERIFY_SSL, default=DEFAULT_VERIFY_SSL): cv.boolean,
+            }
+        )
+
+        return self.async_show_form(step_id="router_add", data_schema=schema, errors=errors)
+
+    async def async_step_router_edit(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Select a router to edit."""
+        current_routers = list(self.config_entry.data.get(CONF_ROUTERS, []))
+
+        if user_input is not None:
+            self._selected_router_idx = int(user_input["router_idx"])
+            return await self.async_step_router_edit_details()
+
+        select_options = [
+            SelectOptionDict(value=str(i), label=f"{r.get(CONF_NAME, 'AP')} ({r.get(CONF_HOST)})")
+            for i, r in enumerate(current_routers)
+        ]
+
+        schema = vol.Schema(
+            {
+                vol.Required("router_idx"): SelectSelector(
+                    SelectSelectorConfig(options=select_options, mode=SelectSelectorMode.DROPDOWN)
+                )
+            }
+        )
+
+        return self.async_show_form(step_id="router_edit", data_schema=schema)
+
+    async def async_step_router_edit_details(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Edit connection parameters for the selected router."""
+        current_routers = list(self.config_entry.data.get(CONF_ROUTERS, []))
+        idx = self._selected_router_idx
+
+        if idx is None or idx < 0 or idx >= len(current_routers):
+            return await self.async_step_routers()
+
+        router = current_routers[idx]
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            host = str(user_input.get(CONF_HOST, "")).strip()
+            name = str(user_input.get(CONF_NAME, "")).strip()
+
+            other_routers = [r for i, r in enumerate(current_routers) if i != idx]
+            if any(r.get(CONF_HOST) == host for r in other_routers):
+                errors["base"] = "host_exists"
+            elif any(r.get(CONF_NAME) == name for r in other_routers):
+                errors["base"] = "name_exists"
+            else:
+                updated_router = dict(user_input)
+                # If password was left blank, retain the previous password
+                if not updated_router.get(CONF_PASSWORD):
+                    updated_router[CONF_PASSWORD] = router.get(CONF_PASSWORD, "")
+
+                err = await async_test_router_connection(self.hass, updated_router)
+                if err:
+                    errors["base"] = err
+                else:
+                    new_routers = list(current_routers)
+                    new_routers[idx] = updated_router
+                    new_data = dict(self.config_entry.data)
+                    new_data[CONF_ROUTERS] = new_routers
+                    self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+                    return self.async_create_entry(title="", data=self.config_entry.options)
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_NAME, default=router.get(CONF_NAME, "")): cv.string,
+                vol.Required(CONF_HOST, default=router.get(CONF_HOST, "")): cv.string,
+                vol.Required(CONF_PORT, default=router.get(CONF_PORT, DEFAULT_PORT)): cv.port,
+                vol.Required(CONF_USERNAME, default=router.get(CONF_USERNAME, DEFAULT_USERNAME)): cv.string,
+                vol.Optional(CONF_PASSWORD, default=router.get(CONF_PASSWORD, "")): cv.string,
+                vol.Optional(CONF_SSL, default=router.get(CONF_SSL, DEFAULT_SSL)): cv.boolean,
+                vol.Optional(CONF_VERIFY_SSL, default=router.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)): cv.boolean,
+            }
+        )
+
+        return self.async_show_form(step_id="router_edit_details", data_schema=schema, errors=errors)
+
+    async def async_step_router_remove(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Remove a router from the mesh network."""
+        current_routers = list(self.config_entry.data.get(CONF_ROUTERS, []))
+
+        if len(current_routers) <= 1:
+            return self.async_abort(reason="cannot_remove_last_router")
+
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            idx = int(user_input["router_idx"])
+            removed_router = current_routers.pop(idx)
+            removed_name = removed_router.get(CONF_NAME, "")
+            clean_name = removed_name.replace(" ", "_").lower()
+
+            # Clean up entity registry for the removed node's sensors
+            ent_reg = er.async_get(self.hass)
+            entries = er.async_entries_for_config_entry(ent_reg, self.config_entry.entry_id)
+            for reg_entry in entries:
+                uid = reg_entry.unique_id
+                if (
+                    uid.startswith(f"openwrt_node_status_{clean_name}")
+                    or uid.startswith(f"openwrt_node_clients_{clean_name}")
+                    or uid.startswith(f"openwrt_node_tracked_{clean_name}")
+                ):
+                    _LOGGER.info("Removing obsolete entity for deleted node %s: %s", removed_name, reg_entry.entity_id)
+                    ent_reg.async_remove(reg_entry.entity_id)
+
+            new_data = dict(self.config_entry.data)
+            new_data[CONF_ROUTERS] = current_routers
+            self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+            return self.async_create_entry(title="", data=self.config_entry.options)
+
+        select_options = [
+            SelectOptionDict(value=str(i), label=f"{r.get(CONF_NAME, 'AP')} ({r.get(CONF_HOST)})")
+            for i, r in enumerate(current_routers)
+        ]
+
+        schema = vol.Schema(
+            {
+                vol.Required("router_idx"): SelectSelector(
+                    SelectSelectorConfig(options=select_options, mode=SelectSelectorMode.DROPDOWN)
+                )
+            }
+        )
+
+        return self.async_show_form(step_id="router_remove", data_schema=schema, errors=errors)
