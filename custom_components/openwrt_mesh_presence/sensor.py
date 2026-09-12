@@ -103,7 +103,7 @@ class OpenWrtTotalClientsSensor(CoordinatorEntity[OpenWrtMeshCoordinator], Senso
         """Initialize total clients sensor."""
         super().__init__(coordinator)
         self._attr_unique_id = f"openwrt_mesh_total_clients_{coordinator.entry.entry_id}"
-        self._attr_name = "Всего клиентов в сети"
+        self._attr_name = "Total Clients"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -173,7 +173,7 @@ class OpenWrtNodeTrackedClientsSensor(CoordinatorEntity[OpenWrtMeshCoordinator],
         self._node_name = node_name
         clean_name = self._node_name.replace(" ", "_").lower()
         self._attr_unique_id = f"openwrt_node_tracked_{clean_name}_{coordinator.entry.entry_id}"
-        self._attr_name = f"{self._node_name} Отслеживаемых устройств"
+        self._attr_name = f"{self._node_name} Tracked Devices"
 
     @property
     def device_info(self) -> DeviceInfo:
