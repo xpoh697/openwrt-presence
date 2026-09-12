@@ -12,6 +12,17 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+)
 
 from .client import OpenWrtAuthError, OpenWrtConnectionError, OpenWrtUbusClient
 from .const import (
@@ -168,16 +179,12 @@ class OpenWrtMeshConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> config_entries.OptionsFlow:
-        """Create options flow handler."""
-        return OpenWrtMeshOptionsFlowHandler(config_entry)
+        """Create options flow handler without passing config_entry to constructor."""
+        return OpenWrtMeshOptionsFlowHandler()
 
 
 class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow for OpenWrt Mesh Presence."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Manage options: select tracked devices, enter manual MACs, set names."""
@@ -187,49 +194,73 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
         if coordinator:
             discovered_dict = coordinator.get_discovered_devices()
 
-        current_options = self.config_entry.options
+        current_options = self.config_entry.options or {}
 
         if user_input is not None:
-            # Normalize and merge MACs
             selected_macs = [normalize_mac(m) for m in user_input.get(CONF_TRACKED_MACS, []) if normalize_mac(m)]
             user_input[CONF_TRACKED_MACS] = selected_macs
             return self.async_create_entry(title="", data=user_input)
 
-        current_macs = current_options.get(CONF_TRACKED_MACS, [])
-        current_manual = current_options.get(CONF_MANUAL_MACS, "")
-        current_names_text = current_options.get(CONF_DEVICE_NAMES_TEXT, "")
+        current_macs = current_options.get(CONF_TRACKED_MACS, []) or []
+        current_manual = current_options.get(CONF_MANUAL_MACS, "") or ""
+        current_names_text = current_options.get(CONF_DEVICE_NAMES_TEXT, "") or ""
         current_poll = current_options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL)
         current_grace = current_options.get(CONF_ROAMING_GRACE_PERIOD, DEFAULT_ROAMING_GRACE_PERIOD)
 
-        # Ensure all currently tracked macs appear in options list
+        # Merge discovered devices and currently tracked MACs
         options_dict = dict(discovered_dict)
         for mac in current_macs:
             norm = normalize_mac(mac)
             if norm and norm not in options_dict:
                 options_dict[norm] = norm
 
+        select_options = [
+            SelectOptionDict(value=val, label=lbl)
+            for val, lbl in options_dict.items()
+        ]
+
         schema = vol.Schema(
             {
                 vol.Optional(
                     CONF_TRACKED_MACS,
                     default=current_macs,
-                ): cv.multi_select(options_dict),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=select_options,
+                        multiple=True,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
                 vol.Optional(
                     CONF_MANUAL_MACS,
                     default=current_manual,
-                ): cv.string,
+                ): TextSelector(TextSelectorConfig(multiline=True)),
                 vol.Optional(
                     CONF_DEVICE_NAMES_TEXT,
                     default=current_names_text,
-                ): cv.string,
+                ): TextSelector(TextSelectorConfig(multiline=True)),
                 vol.Required(
                     CONF_POLL_INTERVAL,
                     default=current_poll,
-                ): vol.All(vol.Coerce(int), vol.Range(min=2, max=60)),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=2,
+                        max=60,
+                        step=1,
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
                 vol.Required(
                     CONF_ROAMING_GRACE_PERIOD,
                     default=current_grace,
-                ): vol.All(vol.Coerce(int), vol.Range(min=5, max=120)),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=5,
+                        max=120,
+                        step=1,
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
             }
         )
 

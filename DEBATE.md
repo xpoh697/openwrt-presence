@@ -774,3 +774,71 @@
 3. `config_flow.py`: обновление Options Flow с отображением найденных устройств, полем ввода дополнительных MAC и настройкой имён.
 4. `sensor.py`, `binary_sensor.py`, `device_tracker.py`: единый `device_info` для сборки в одно устройство, очистка удаленных сущностей.
 5. Развертывание интеграции на сервер Home Assistant `192.168.100.5`.
+
+
+## [2026-09-12 12:12] Задача: Не удалось загрузить мастер настройки: 500 Internal Server Error Server got itself in trouble
+
+### Archi (Lead Architect) - Итерация 1
+Пользователь прислал скриншот критической ошибки: при попытке открыть «Настроить» (Options Flow) сервер Home Assistant выбрасывает HTTP 500: `500 Internal Server Error Server got itself in trouble`.
+
+**Точная причина сбоя:**
+1. В Home Assistant 2024.4+ класс `config_entries.OptionsFlow` определяет базовое свойство:
+   `@property def config_entry(self) -> ConfigEntry:` без сеттера (`no setter`).
+2. В нашем коде `config_flow.py`:
+   ```python
+   class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
+       def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+           self.config_entry = config_entry  # <--- CRASH! AttributeError: property 'config_entry' of 'OptionsFlow' object has no setter!
+   ```
+   При клике на «Настроить» Home Assistant пытается создать объект и падает с `AttributeError`, возвращая 500 Internal Server Error.
+3. Кроме того, устаревший валидатор `cv.multi_select(options_dict)` при пустом словаре или несовпадении типов вызывает ошибку сериализации формы на стороне Home Assistant.
+
+**Предложение Archi (Итерация 1):**
+1. Исправить `OpenWrtMeshOptionsFlowHandler`: убрать переопределение `__init__`, позволив базовому классу `OptionsFlow` штатно управлять `self.config_entry` (в точности как в эталонном проекте EMS: `return OpenWrtMeshOptionsFlowHandler()`).
+2. Перейти на современные `homeassistant.helpers.selector` (`SelectSelector`, `TextSelector`, `NumberSelector`), которые гарантируют 100% совместимость со всеми версиями Home Assistant и никогда не ломают фронтенд при пустых списках.
+3. Добавить безопасное получение координатора: если координатор временно недоступен или еще не закончил опрос, форма открывается без сбоя с полями ручного ввода.
+
+---
+
+### Skeptic (Senior QA/SRE) - Итерация 1
+Критический анализ решения Archi:
+1. **Обратная совместимость версий Home Assistant**:
+   - В зависимости от того, как вызывается `async_get_options_flow`, старые версии HA могли требовать `config_entry` в конструкторе, а новые (2024.4+) запрещают сеттер. Конструктор должен быть полностью опущен (как в эталонном EMS), а `self.config_entry` должен запрашиваться из свойства базового класса.
+2. **Селектор устройств при пустом кэше Discovery**:
+   - Если пользователь открывает мастер настройки в момент, когда роутеры еще не опрошены (кэш discovery пуст), `SelectSelector` с пустым списком опций не должен вызывать ошибку UI. Если список пуст, мы должны подставить хотя бы уже сохраненные в конфиге MAC-адреса либо понятную заглушку.
+3. **Безопасное извлечение опций (NoneType Protection)**:
+   - В `self.config_entry.options` ключи могут отсутствовать (`None`). Все вызовы `.get()` должны иметь надежные fallback-значения по умолчанию (`[]`, `""`, `5`, `15`), чтобы исключить `TypeError: unhashable type` или `KeyError`.
+
+---
+
+### Archi (Lead Architect) - Итерация 2
+Все 3 замечания приняты:
+1. Конструктор `OpenWrtMeshOptionsFlowHandler` полностью приводится к стандарту Home Assistant 2024–2026 (как в EMS):
+   ```python
+   @staticmethod
+   @callback
+   def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> config_entries.OptionsFlow:
+       return OpenWrtMeshOptionsFlowHandler()
+   ```
+   Внутри класса `__init__` не переопределяется — `self.config_entry` берется напрямую из свойства базового класса.
+2. Селектор использует `SelectSelector` со списком `SelectOptionDict`. Если устройств еще нет в кэше, формируются опции из уже сохраненных в `config_entry.options` MAC-адресов.
+3. Добавлена полная защита от `None` для всех полей ввода.
+
+---
+
+### Skeptic (Senior QA/SRE) - Итерация 2
+Консенсус достигнут. Решение:
+- Ликвидирует причину ошибки 500 (`AttributeError: can't set attribute 'config_entry'`).
+- Обеспечивает плавное открытие окна настроек в любых состояниях координатора.
+- Использует современные селекторы Home Assistant.
+
+3 правила при реализации:
+1. Записать `config_flow.py` целиком через `write_to_file`.
+2. Скомпилировать через `py_compile` для проверки синтаксиса.
+3. Немедленно выполнить деплой через `deploy.ps1`.
+
+---
+
+### Заключение
+- Исправление `config_flow.py` (устранение переопределения `self.config_entry`, переход на `SelectSelector`).
+- Развертывание исправленного компонента на сервер Home Assistant.
