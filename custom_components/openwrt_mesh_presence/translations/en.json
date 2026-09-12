@@ -1,0 +1,57 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add OpenWrt Access Point",
+        "description": "Enter connection details for the first access point (Master AP).",
+        "data": {
+          "name": "Access Point Name (e.g. Living Room AP)",
+          "host": "Router IP address",
+          "port": "Port",
+          "username": "LuCI Username",
+          "password": "Password",
+          "ssl": "Use HTTPS (SSL)",
+          "verify_ssl": "Verify SSL Certificate"
+        }
+      },
+      "add_router": {
+        "title": "Add Additional Mesh Node",
+        "description": "Enter connection details for the next mesh router.",
+        "data": {
+          "name": "Access Point Name (e.g. Bedroom AP)",
+          "host": "Router IP address",
+          "port": "Port",
+          "username": "LuCI Username",
+          "password": "Password",
+          "ssl": "Use HTTPS (SSL)",
+          "verify_ssl": "Verify SSL Certificate"
+        }
+      },
+      "add_more": {
+        "title": "Mesh Nodes",
+        "description": "Added nodes: {count} ({added_nodes}). Do you want to add another node to this mesh network?",
+        "data": {
+          "add_another": "Add another access point"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to router. Check IP address and network.",
+      "invalid_auth": "Invalid LuCI username or password.",
+      "unknown": "Unexpected error."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "OpenWrt Mesh Presence Settings",
+        "data": {
+          "tracking_mode": "Tracking Mode",
+          "tracked_macs": "Tracked Devices",
+          "poll_interval": "Router Poll Interval (sec)",
+          "roaming_grace_period": "Roaming Grace Period (sec)"
+        }
+      }
+    }
+  }
+}

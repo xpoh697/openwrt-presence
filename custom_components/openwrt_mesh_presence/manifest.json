@@ -1,0 +1,12 @@
+{
+  "domain": "openwrt_mesh_presence",
+  "name": "OpenWrt Mesh Presence",
+  "codeowners": ["@xpoh697"],
+  "config_flow": true,
+  "documentation": "https://github.com/xpoh697/openwrt-presence",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/xpoh697/openwrt-presence/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}
