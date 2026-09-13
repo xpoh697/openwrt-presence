@@ -1386,3 +1386,90 @@
    - Мастера: Добавить точку (`router_add`), Изменить точку (`router_edit`), Удалить точку (`router_remove`).
 2. Добавление локализации шагов и ошибок в `strings.json`, `translations/ru.json`, `translations/en.json`.
 3. Тестирование компиляции, деплой на сервер `192.168.100.5` и публикация в GitHub.
+
+
+## [2026-09-13 08:36] Задача: добавь в интеграции сущности кнопор для перезагрузки AP
+
+### Archi (Lead Architect) - Итерация 1
+Пользователь запросил добавление в интеграцию сущностей кнопок для удаленной перезагрузки каждой точки доступа (Mesh AP).
+
+**Ценность фичи:**
+- В Mesh-сетях периодически возникает необходимость перезапустить радиомодуль или освободить память на удаленной точке (например, на чердаке `AP_PODDASZE` или втором этаже `AP_PIETRO`), не заходя по SSH и не открывая веб-интерфейс LuCI каждого роутера.
+- Наличие кнопок `button` прямо на странице устройства Home Assistant дает возможность делать перезагрузку в один клик или встраивать ночной ребут по расписанию в автоматизации Home Assistant.
+
+**Предложение Archi (Итерация 1):**
+1. В `const.py` добавить платформу `button` в список поддерживаемых платформ `PLATFORMS`.
+2. В `client.py` добавить метод `reboot()`:
+   - Вызывает штатный метод OpenWrt `ubus call system reboot {}`.
+   - Проверка показала, что у сервисной сессии LuCI права на `system.reboot` включены по умолчанию (`access: true`).
+3. Создать платформу `button.py`:
+   - Реализовать класс `OpenWrtNodeRebootButton(CoordinatorEntity, ButtonEntity)`:
+     - `device_class = ButtonDeviceClass.RESTART`
+     - Имя: `f"{client.node_name} Reboot"` (с чистым английским ID, например `button.openwrt_mesh_presence_ap_parter_reboot`).
+     - Иконка: `mdi:restart`.
+     - Привязка к общему хабу `DeviceInfo(identifiers={(DOMAIN, entry_id)})`.
+     - Метод `async_press()`, запускающий `client.reboot()`.
+
+---
+
+### Skeptic (Senior QA/SRE) - Итерация 1
+Критический анализ решения Archi с точки зрения сетевой надежности и стабильности Home Assistant:
+
+1. **Неизбежный обрыв HTTP-сокета при вызове `system.reboot` (Socket Drop Trap)**:
+   - При вызове `system.reboot` ядро OpenWrt мгновенно завершает процессы и перезагружает систему. Веб-сервер `uhttpd` сбрасывает TCP-соединение (Connection reset by peer / Server disconnected) либо не успевает отправить HTTP 200.
+   - Если клиент aiohttp в Home Assistant ожидает корректный JSON-RPC ответ, в интерфейсе Home Assistant выскочит красная всплывающая ошибка `Failed to call service button/press: Server disconnected`.
+   - Метод `reboot()` в `client.py` обязан перехватывать сетевой сброс (`aiohttp.ClientError`, `asyncio.TimeoutError`) и корректно гасить его, подтверждая отправку команды.
+2. **Блокировка кнопки при недоступности узла (Offline Availability Guard)**:
+   - Если роутер уже выключен или находится в процессе перезагрузки (`node.is_online == False`), кнопка не должна позволять отправку запросов в никуда. Свойство `available` у кнопки должно возвращать `False`, чтобы в UI кнопка становилась неактивной (серой) до полного восстановления связи.
+3. **Безопасность при удалении точки из конфигурации**:
+   - При удалении роутера через меню настроек (`router_remove`), созданная для него кнопка перезагрузки `button` должна автоматически удаляться из реестра сущностей Home Assistant (`entity_registry`), аналогично сенсорам.
+
+---
+
+### Archi (Lead Architect) - Итерация 2
+Все 3 замечания Skeptic полностью приняты и заложены в проект:
+
+1. **Безопасный перехват сброса сокета в `client.py`**:
+   ```python
+   async def reboot(self) -> None:
+       """Reboot the OpenWrt router via ubus system.reboot call."""
+       _LOGGER.info("Sending reboot command to OpenWrt node '%s' (%s)", self.node_name, self.host)
+       try:
+           await self._call_ubus("system", "reboot", {})
+       except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+           # OpenWrt closes socket abruptly during reboot - this is normal behavior
+           _LOGGER.info("Node '%s' accepted reboot command (connection closed: %s)", self.node_name, err)
+   ```
+2. **Динамическая доступность кнопки**:
+   ```python
+   @property
+   def available(self) -> bool:
+       """Button is only clickable when the node is online."""
+       node = self.coordinator.data.nodes.get(self._node_name)
+       return node.is_online if node else False
+   ```
+3. **Очистка реестра**:
+   - В `config_flow.py` в процедуру `async_step_router_remove` добавляется удаление сущностей с префиксом `openwrt_reboot_{clean_name}`.
+
+---
+
+### Skeptic (Senior QA/SRE) - Итерация 2
+Консенсус достигнут:
+- Интеграция получает удобный и безопасный инструмент администрирования mesh-сети.
+- Исключены ложные ошибки в UI при перезагрузке узлов.
+- Обеспечена полная целостность реестра сущностей.
+
+3 правила при реализации:
+1. Запись новых и обновляемых файлов производить только целиком через `write_to_file`. Никакой частичной автозамены.
+2. Проверить синтаксис всех затронутых файлов через `py_compile`.
+3. Развернуть код через `deploy.ps1` на сервер `192.168.100.5` и зафиксировать в Git.
+
+---
+
+### Заключение
+Согласовано:
+1. Добавление `"button"` в `PLATFORMS` в `const.py`.
+2. Добавление метода `reboot()` в `client.py`.
+3. Создание платформы `button.py` с классом `OpenWrtNodeRebootButton`.
+4. Обновление очистки реестра в `config_flow.py` (удаление кнопок при удалении узла).
+5. Компиляция, деплой на сервер `192.168.100.5` и push в GitHub.

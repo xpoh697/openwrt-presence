@@ -42,7 +42,7 @@ DEFAULT_REQUEST_TIMEOUT: Final = 4  # seconds
 DEFAULT_DEVICE_EXPIRY_HOURS: Final = 24  # prune inactive MACs after 24h
 
 # Platforms
-PLATFORMS: Final = ["device_tracker", "sensor", "binary_sensor"]
+PLATFORMS: Final = ["device_tracker", "sensor", "binary_sensor", "button"]
 
 
 def normalize_mac(raw_mac: str) -> str | None:

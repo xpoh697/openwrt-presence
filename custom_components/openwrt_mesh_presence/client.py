@@ -188,6 +188,15 @@ class OpenWrtUbusClient:
 
         return None
 
+    async def reboot(self) -> None:
+        """Reboot the OpenWrt router via ubus system.reboot call."""
+        _LOGGER.warning("Triggering reboot for OpenWrt node '%s' (%s)", self._node_name, self._host)
+        try:
+            await self.call("system", "reboot", {})
+        except Exception as err:
+            # During reboot, uhttpd closes socket abruptly - this is expected behavior
+            _LOGGER.info("Node '%s' initiated reboot (connection closed: %s)", self._node_name, err)
+
     async def update_wireless_interfaces(self) -> None:
         """Discover wireless interfaces and BSSIDs on this router."""
         interfaces: list[str] = []

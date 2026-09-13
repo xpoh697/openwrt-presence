@@ -493,7 +493,7 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
             removed_name = removed_router.get(CONF_NAME, "")
             clean_name = removed_name.replace(" ", "_").lower()
 
-            # Clean up entity registry for the removed node's sensors
+            # Clean up entity registry for the removed node's sensors and buttons
             ent_reg = er.async_get(self.hass)
             entries = er.async_entries_for_config_entry(ent_reg, self.config_entry.entry_id)
             for reg_entry in entries:
@@ -502,6 +502,7 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
                     uid.startswith(f"openwrt_node_status_{clean_name}")
                     or uid.startswith(f"openwrt_node_clients_{clean_name}")
                     or uid.startswith(f"openwrt_node_tracked_{clean_name}")
+                    or uid.startswith(f"openwrt_reboot_{clean_name}")
                 ):
                     _LOGGER.info("Removing obsolete entity for deleted node %s: %s", removed_name, reg_entry.entity_id)
                     ent_reg.async_remove(reg_entry.entity_id)
