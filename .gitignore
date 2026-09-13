@@ -42,3 +42,7 @@ desktop.ini
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Local deployment scripts
+deploy.ps1
+*.local.ps1
