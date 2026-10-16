@@ -2,12 +2,15 @@
   <img src="https://raw.githubusercontent.com/xpoh697/openwrt-presence/main/custom_components/openwrt_mesh_presence/brand/icon.png" width="160" height="160" alt="OpenWrt Mesh Presence Logo">
 </p>
 
-# OpenWrt Mesh Presence Tracking для Home Assistant (HACS)
+<h1 align="center">OpenWrt Mesh Presence Tracking — Home Assistant Integration</h1>
 
-[![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/default)
-[![OpenWrt](https://img.shields.io/badge/OpenWrt-21.x%20--%2025%2B-blue.svg)](https://openwrt.org)
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue.svg)](https://www.home-assistant.io)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/hacs/default"><img src="https://img.shields.io/badge/HACS-Custom-orange.svg" alt="HACS"></a>
+  <a href="https://github.com/xpoh697/openwrt-presence/releases"><img src="https://img.shields.io/github/v/release/xpoh697/openwrt-presence?include_prereleases" alt="Release"></a>
+  <a href="https://github.com/xpoh697/openwrt-presence/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
+</p>
+
+**Автор:** [xpoh697](https://github.com/xpoh697)
 
 Интеграция для **Home Assistant**, предназначенная для высокоточного отслеживания присутствия устройств (Presence Detection) и мониторинга Wi-Fi роуминга в Mesh-сетях из 2-х, 3-х и более точек доступа под управлением **OpenWrt (включая версию 25+)**.
 
