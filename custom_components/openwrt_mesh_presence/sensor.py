@@ -20,63 +20,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import DeviceState, NodeState, OpenWrtMeshCoordinator
+from .coordinator import DeviceState, NodeState, OpenWrtMeshCoordinator, UserState
 
 _LOGGER = logging.getLogger(__name__)
-
-
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
-    """Set up sensor entities based on a config entry."""
-    coordinator: OpenWrtMeshCoordinator = hass.data[DOMAIN][entry.entry_id]
-
-    tracked_sensor_macs: set[str] = set()
-
-    # 1. Total mesh clients sensor
-    entities: list[SensorEntity] = [OpenWrtTotalClientsSensor(coordinator)]
-
-    # 2. Router diagnostic sensors (all clients and tracked clients per AP)
-    for client in coordinator.clients:
-        entities.append(OpenWrtNodeClientsSensor(coordinator, client.node_name))
-        entities.append(OpenWrtNodeTrackedClientsSensor(coordinator, client.node_name))
-
-    async_add_entities(entities)
-
-    # 3. Dynamic sensors for tracked devices
-    @callback
-    def _update_device_sensors(new_macs: list[str] | None = None) -> None:
-        """Add sensors for newly discovered or configured tracked devices."""
-        new_sensors: list[SensorEntity] = []
-        for mac in coordinator.data.devices:
-            if mac not in tracked_sensor_macs and coordinator.is_device_tracked(mac):
-                tracked_sensor_macs.add(mac)
-                new_sensors.append(OpenWrtConnectedApSensor(coordinator, mac))
-                new_sensors.append(OpenWrtDeviceRssiSensor(coordinator, mac))
-                new_sensors.append(OpenWrtDeviceLastSeenSensor(coordinator, mac))
-
-        if new_sensors:
-            async_add_entities(new_sensors)
-
-    coordinator.register_new_device_callback(_update_device_sensors)
-    _update_device_sensors()
-
-    # 4. Clean up entities for devices that were removed from tracking
-    ent_reg = er.async_get(hass)
-    entries = er.async_entries_for_config_entry(ent_reg, entry.entry_id)
-    for reg_entry in entries:
-        if reg_entry.domain == "sensor":
-            unique_id = reg_entry.unique_id
-            # If unique_id is device-specific, check if device is still tracked
-            for prefix in ("openwrt_ap_", "openwrt_rssi_", "openwrt_seen_"):
-                if unique_id.startswith(prefix):
-                    clean_mac = unique_id.replace(prefix, "")
-                    mac = clean_mac.replace("_", ":").upper()
-                    if not coordinator.is_device_tracked(mac):
-                        _LOGGER.info("Removing obsolete sensor entity %s for untracked MAC %s", reg_entry.entity_id, mac)
-                        ent_reg.async_remove(reg_entry.entity_id)
 
 
 def _get_shared_device_info(coordinator: OpenWrtMeshCoordinator) -> DeviceInfo:
@@ -90,6 +36,83 @@ def _get_shared_device_info(coordinator: OpenWrtMeshCoordinator) -> DeviceInfo:
         sw_version="1.0.0",
         configuration_url=f"http://{first_host}" if first_host else None,
     )
+
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up sensor entities based on a config entry."""
+    coordinator: OpenWrtMeshCoordinator = hass.data[DOMAIN][entry.entry_id]
+
+    tracked_sensor_macs: set[str] = set()
+    tracked_sensor_users: set[str] = set()
+
+    # 1. Total mesh clients sensor
+    entities: list[SensorEntity] = [OpenWrtTotalClientsSensor(coordinator)]
+
+    # 2. Router diagnostic sensors (all clients and tracked clients per AP)
+    for client in coordinator.clients:
+        entities.append(OpenWrtNodeClientsSensor(coordinator, client.node_name))
+        entities.append(OpenWrtNodeTrackedClientsSensor(coordinator, client.node_name))
+
+    async_add_entities(entities)
+
+    # 3. Dynamic sensors for tracked users and standalone devices
+    @callback
+    def _update_sensors() -> None:
+        """Add sensors for newly configured users or standalone devices."""
+        new_sensors: list[SensorEntity] = []
+
+        # 3a. User Profile sensors
+        for user_id in coordinator.data.users:
+            if user_id not in tracked_sensor_users:
+                tracked_sensor_users.add(user_id)
+                new_sensors.append(OpenWrtUserConnectedApSensor(coordinator, user_id))
+                new_sensors.append(OpenWrtUserSignalSensor(coordinator, user_id))
+                new_sensors.append(OpenWrtUserLastSeenSensor(coordinator, user_id))
+
+        # 3b. Standalone device sensors (skip if MAC is in a user group)
+        for mac in coordinator.data.devices:
+            if mac not in tracked_sensor_macs and coordinator.is_device_tracked(mac):
+                if not any(mac in u.macs for u in coordinator.data.users.values()):
+                    tracked_sensor_macs.add(mac)
+                    new_sensors.append(OpenWrtConnectedApSensor(coordinator, mac))
+                    new_sensors.append(OpenWrtDeviceRssiSensor(coordinator, mac))
+                    new_sensors.append(OpenWrtDeviceLastSeenSensor(coordinator, mac))
+
+        if new_sensors:
+            async_add_entities(new_sensors)
+
+    coordinator.register_new_device_callback(_update_sensors)
+    _update_sensors()
+
+    # 4. Clean up entities for devices/users that were removed from tracking
+    ent_reg = er.async_get(hass)
+    entries = er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+    for reg_entry in entries:
+        if reg_entry.domain == "sensor":
+            uid = reg_entry.unique_id
+            # User sensors cleanup
+            for prefix in ("openwrt_user_ap_", "openwrt_user_rssi_", "openwrt_user_seen_"):
+                if uid.startswith(prefix):
+                    suffix = f"_{entry.entry_id}"
+                    if uid.endswith(suffix):
+                        user_id = uid[len(prefix) : -len(suffix)]
+                        if user_id not in coordinator.data.users:
+                            _LOGGER.info("Removing obsolete user sensor %s for user %s", reg_entry.entity_id, user_id)
+                            ent_reg.async_remove(reg_entry.entity_id)
+
+            # Standalone device sensors cleanup
+            for prefix in ("openwrt_ap_", "openwrt_rssi_", "openwrt_seen_"):
+                if uid.startswith(prefix):
+                    clean_mac = uid.replace(prefix, "")
+                    mac = clean_mac.replace("_", ":").upper()
+                    is_in_user = any(mac in u.macs for u in coordinator.data.users.values())
+                    if not coordinator.is_device_tracked(mac) or is_in_user:
+                        _LOGGER.info("Removing obsolete sensor entity %s for MAC %s", reg_entry.entity_id, mac)
+                        ent_reg.async_remove(reg_entry.entity_id)
 
 
 class OpenWrtTotalClientsSensor(CoordinatorEntity[OpenWrtMeshCoordinator], SensorEntity):
@@ -161,7 +184,7 @@ class OpenWrtNodeClientsSensor(CoordinatorEntity[OpenWrtMeshCoordinator], Sensor
 
 
 class OpenWrtNodeTrackedClientsSensor(CoordinatorEntity[OpenWrtMeshCoordinator], SensorEntity):
-    """Sensor reporting the count of tracked devices connected to a specific OpenWrt mesh node."""
+    """Sensor reporting the count of tracked entities connected to a specific OpenWrt mesh node."""
 
     _attr_has_entity_name = True
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -187,36 +210,197 @@ class OpenWrtNodeTrackedClientsSensor(CoordinatorEntity[OpenWrtMeshCoordinator],
 
     @property
     def native_value(self) -> int:
-        """Return count of tracked devices currently connected to this AP."""
+        """Return count of tracked users and devices currently connected to this AP."""
         node = self._current_node
         if not node or not node.is_online:
             return 0
 
         count = 0
+        # 1. Count connected user profiles
+        for uid, user_state in self.coordinator.data.users.items():
+            if user_state.is_home and user_state.connected_ap == self._node_name:
+                count += 1
+
+        # 2. Count connected standalone devices not belonging to a user group
         for mac, dev in self.coordinator.data.devices.items():
             if dev.is_home and dev.connected_ap == self._node_name and self.coordinator.is_device_tracked(mac):
-                count += 1
+                if not any(mac in u.macs for u in self.coordinator.data.users.values()):
+                    count += 1
+
         return count
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return attributes including list of connected device names."""
+        """Return attributes including list of connected names."""
         node = self._current_node
-        device_names: list[str] = []
+        names: list[str] = []
         macs: list[str] = []
 
         if node and node.is_online:
+            for uid, user_state in self.coordinator.data.users.items():
+                if user_state.is_home and user_state.connected_ap == self._node_name:
+                    names.append(user_state.name)
+                    if user_state.active_mac:
+                        macs.append(user_state.active_mac)
+
             for mac, dev in self.coordinator.data.devices.items():
                 if dev.is_home and dev.connected_ap == self._node_name and self.coordinator.is_device_tracked(mac):
-                    device_names.append(dev.name)
-                    macs.append(mac)
+                    if not any(mac in u.macs for u in self.coordinator.data.users.values()):
+                        names.append(dev.name)
+                        macs.append(mac)
 
         return {
-            "devices": device_names,
+            "devices": names,
             "mac_addresses": macs,
             "host": node.host if node else None,
             "is_online": node.is_online if node else False,
         }
+
+
+class OpenWrtUserConnectedApSensor(CoordinatorEntity[OpenWrtMeshCoordinator], SensorEntity):
+    """Sensor indicating which specific Mesh AP a user is currently connected to."""
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:router-wireless"
+
+    def __init__(self, coordinator: OpenWrtMeshCoordinator, user_id: str) -> None:
+        """Initialize user connected AP sensor."""
+        super().__init__(coordinator)
+        self._user_id = user_id
+        self._attr_unique_id = f"openwrt_user_ap_{self._user_id}_{coordinator.entry.entry_id}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Link to the single unified device."""
+        return _get_shared_device_info(self.coordinator)
+
+    @property
+    def _current_user(self) -> UserState | None:
+        """Get user state from coordinator."""
+        return self.coordinator.data.users.get(self._user_id)
+
+    @property
+    def name(self) -> str:
+        """Return entity name."""
+        user = self._current_user
+        name = user.name if user else self._user_id
+        return f"{name} Connected AP"
+
+    @property
+    def native_value(self) -> str:
+        """Return name of connected AP or 'Не в сети'."""
+        user = self._current_user
+        if user and user.is_home and user.connected_ap:
+            return user.connected_ap
+        return "Не в сети"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return user wireless connection attributes."""
+        user = self._current_user
+        if not user:
+            return {"user_id": self._user_id}
+        return {
+            "user_id": self._user_id,
+            "active_mac": user.active_mac,
+            "mac_addresses": user.macs,
+            "ip_address": user.ip_address,
+            "bssid": user.bssid,
+            "ssid": user.ssid,
+            "interface": user.interface,
+            "is_home": user.is_home,
+        }
+
+
+class OpenWrtUserSignalSensor(CoordinatorEntity[OpenWrtMeshCoordinator], SensorEntity):
+    """Sensor reporting Wi-Fi RSSI in dBm of an aggregated user."""
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
+
+    def __init__(self, coordinator: OpenWrtMeshCoordinator, user_id: str) -> None:
+        """Initialize user RSSI sensor."""
+        super().__init__(coordinator)
+        self._user_id = user_id
+        self._attr_unique_id = f"openwrt_user_rssi_{self._user_id}_{coordinator.entry.entry_id}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Link to the single unified device."""
+        return _get_shared_device_info(self.coordinator)
+
+    @property
+    def _current_user(self) -> UserState | None:
+        """Get user state from coordinator."""
+        return self.coordinator.data.users.get(self._user_id)
+
+    @property
+    def name(self) -> str:
+        """Return entity name."""
+        user = self._current_user
+        name = user.name if user else self._user_id
+        return f"{name} Signal"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return signal strength in dBm."""
+        user = self._current_user
+        if user and user.is_home:
+            return user.signal
+        return None
+
+    @property
+    def icon(self) -> str:
+        """Dynamically select Wi-Fi icon based on signal quality."""
+        rssi = self.native_value
+        if rssi is None:
+            return "mdi:wifi-off"
+        if rssi >= -50:
+            return "mdi:wifi-strength-4"
+        if rssi >= -65:
+            return "mdi:wifi-strength-3"
+        if rssi >= -75:
+            return "mdi:wifi-strength-2"
+        return "mdi:wifi-strength-1"
+
+
+class OpenWrtUserLastSeenSensor(CoordinatorEntity[OpenWrtMeshCoordinator], SensorEntity):
+    """Sensor reporting last confirmation timestamp of a user."""
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:clock-check-outline"
+
+    def __init__(self, coordinator: OpenWrtMeshCoordinator, user_id: str) -> None:
+        """Initialize user last seen sensor."""
+        super().__init__(coordinator)
+        self._user_id = user_id
+        self._attr_unique_id = f"openwrt_user_seen_{self._user_id}_{coordinator.entry.entry_id}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Link to the single unified device."""
+        return _get_shared_device_info(self.coordinator)
+
+    @property
+    def _current_user(self) -> UserState | None:
+        """Get user state from coordinator."""
+        return self.coordinator.data.users.get(self._user_id)
+
+    @property
+    def name(self) -> str:
+        """Return entity name."""
+        user = self._current_user
+        name = user.name if user else self._user_id
+        return f"{name} Last Seen"
+
+    @property
+    def native_value(self) -> datetime | None:
+        """Return last seen timestamp."""
+        user = self._current_user
+        return user.last_seen if user else None
 
 
 class OpenWrtConnectedApSensor(CoordinatorEntity[OpenWrtMeshCoordinator], SensorEntity):

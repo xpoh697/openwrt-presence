@@ -26,6 +26,12 @@ CONF_MANUAL_MACS: Final = "manual_macs"
 CONF_DEVICE_NAMES: Final = "device_names"
 CONF_DEVICE_NAMES_TEXT: Final = "device_names_text"
 
+# User Profiles / Multi-device keys
+CONF_USERS: Final = "users"
+CONF_USER_ID: Final = "user_id"
+CONF_USER_NAME: Final = "name"
+CONF_USER_MACS: Final = "macs"
+
 # Tracking Modes
 TRACK_MODE_SELECTED: Final = "selected"
 TRACK_MODE_ALL: Final = "all"
@@ -54,6 +60,12 @@ def normalize_mac(raw_mac: str) -> str | None:
     if len(clean) != 12:
         return None
     return ":".join(clean[i : i + 2] for i in range(0, 12, 2))
+
+
+def slugify_user_id(raw_name: str) -> str:
+    """Generate a clean, stable user ID from name."""
+    clean = re.sub(r"[^a-zA-Z0-9_]+", "_", raw_name.strip().lower()).strip("_")
+    return clean or "user"
 
 
 def parse_mac_list(raw_input: str | list[str] | None) -> set[str]:
