@@ -46,49 +46,8 @@
       "init": {
         "title": "OpenWrt Mesh Presence Settings",
         "menu_options": {
-          "users": "Users (multiple MACs / 2.4 + 5 GHz)",
           "devices": "Tracked Devices & Timing",
           "routers": "Manage Mesh Access Points (APs)"
-        }
-      },
-      "users": {
-        "title": "User Profiles Management",
-        "menu_options": {
-          "user_add": "Add new user profile",
-          "user_edit": "Edit user profile",
-          "user_remove": "Delete user profile"
-        }
-      },
-      "user_add": {
-        "title": "Add User Profile",
-        "description": "Create a user profile and bind all their MAC addresses (e.g., 2.4 GHz and 5 GHz bands of the same smartphone).",
-        "data": {
-          "name": "User name (e.g., Vitaly)",
-          "macs": "Select MAC addresses from discovered devices",
-          "manual_macs": "Additional MAC addresses (comma or space separated)"
-        }
-      },
-      "user_edit": {
-        "title": "Select User Profile",
-        "description": "Select the user profile you wish to edit.",
-        "data": {
-          "user_idx": "User"
-        }
-      },
-      "user_edit_details": {
-        "title": "Edit User Profile",
-        "description": "Update user name or linked MAC addresses.",
-        "data": {
-          "name": "User name",
-          "macs": "Linked MAC addresses",
-          "manual_macs": "Additional MAC addresses (comma or space separated)"
-        }
-      },
-      "user_remove": {
-        "title": "Delete User Profile",
-        "description": "Select the user profile to delete. Associated entities will be removed from Home Assistant automatically.",
-        "data": {
-          "user_idx": "User to delete"
         }
       },
       "devices": {
@@ -103,7 +62,7 @@
       },
       "device_names": {
         "title": "Tracked Device Names",
-        "description": "Set friendly names for each device (e.g., Vitaly's Phone, Laptop, etc.):\n\n{device_summary}"
+        "description": "Assign names for each device.\n\n💡 **Merge 2.4 GHz + 5 GHz:** If you assign the **same name** to multiple MAC addresses (e.g., Vitali), they will **automatically merge into a single person tracker**!\n\n{device_summary}"
       },
       "routers": {
         "title": "Manage Mesh Access Points",
@@ -159,14 +118,10 @@
       "invalid_auth": "Invalid LuCI username or password.",
       "host_exists": "An access point with this IP address already exists.",
       "name_exists": "An access point with this name already exists.",
-      "user_name_exists": "A user with this name already exists.",
-      "name_required": "User name is required.",
-      "no_macs": "At least one MAC address must be selected or entered.",
       "unknown": "Unexpected error."
     },
     "abort": {
-      "cannot_remove_last_router": "Cannot delete the last access point in the mesh network.",
-      "no_users": "No users configured."
+      "cannot_remove_last_router": "Cannot delete the last access point in the mesh network."
     }
   }
 }

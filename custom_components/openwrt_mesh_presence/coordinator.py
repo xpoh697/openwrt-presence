@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import logging
 from typing import Any
@@ -22,10 +22,6 @@ from .const import (
     CONF_ROAMING_GRACE_PERIOD,
     CONF_TRACKED_MACS,
     CONF_TRACKING_MODE,
-    CONF_USERS,
-    CONF_USER_ID,
-    CONF_USER_MACS,
-    CONF_USER_NAME,
     DEFAULT_DEVICE_EXPIRY_HOURS,
     DEFAULT_POLL_INTERVAL,
     DEFAULT_ROAMING_GRACE_PERIOD,
@@ -35,7 +31,6 @@ from .const import (
     normalize_mac,
     parse_mac_list,
     parse_name_mapping,
-    slugify_user_id,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,7 +38,7 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class DeviceState:
-    """Represents the current state of a wireless device in the mesh."""
+    """Represents the current state of a wireless device or multi-MAC user in the mesh."""
 
     mac: str
     name: str
@@ -51,24 +46,8 @@ class DeviceState:
     connected_ap: str | None
     signal: int | None
     last_seen: datetime
-    ip_address: str | None = None
-    ssid: str | None = None
-    bssid: str | None = None
-    interface: str | None = None
-
-
-@dataclass
-class UserState:
-    """Represents an aggregated user profile tracking multiple MAC addresses."""
-
-    user_id: str
-    name: str
-    macs: list[str]
-    is_home: bool
-    connected_ap: str | None
-    signal: int | None
-    last_seen: datetime
     active_mac: str | None = None
+    mac_addresses: list[str] = field(default_factory=list)
     ip_address: str | None = None
     ssid: str | None = None
     bssid: str | None = None
@@ -88,16 +67,16 @@ class NodeState:
 
 @dataclass
 class MeshData:
-    """Coordinator payload containing all aggregated devices, users and nodes."""
+    """Coordinator payload containing all aggregated devices and nodes."""
 
     devices: dict[str, DeviceState]
-    users: dict[str, UserState]
     nodes: dict[str, NodeState]
     total_clients: int
+    users: dict[str, Any] = field(default_factory=dict)
 
 
 class OpenWrtMeshCoordinator(DataUpdateCoordinator[MeshData]):
-    """Aggregates wireless clients across multiple OpenWrt mesh nodes."""
+    """Aggregates wireless clients across multiple OpenWrt mesh nodes with auto-merge by name."""
 
     def __init__(
         self,
@@ -119,7 +98,6 @@ class OpenWrtMeshCoordinator(DataUpdateCoordinator[MeshData]):
 
         # Internal state
         self._devices: dict[str, DeviceState] = {}
-        self._users: dict[str, UserState] = {}
         self._nodes: dict[str, NodeState] = {}
         self._discovered_info: dict[str, dict[str, Any]] = {}
         self._new_device_callbacks: list[Any] = []
@@ -130,24 +108,8 @@ class OpenWrtMeshCoordinator(DataUpdateCoordinator[MeshData]):
         return self.entry.options.get(CONF_TRACKING_MODE, TRACK_MODE_SELECTED)
 
     @property
-    def users_config(self) -> list[dict[str, Any]]:
-        """Return configured user profiles."""
-        return self.entry.options.get(CONF_USERS, []) or []
-
-    @property
-    def all_user_macs(self) -> set[str]:
-        """Return set of all MAC addresses assigned to user profiles."""
-        result: set[str] = set()
-        for u in self.users_config:
-            for m in u.get(CONF_USER_MACS, []):
-                norm = normalize_mac(m)
-                if norm:
-                    result.add(norm)
-        return result
-
-    @property
     def tracked_macs(self) -> set[str]:
-        """Return set of explicitly tracked uppercase MACs (from multi-select, manual input, and users)."""
+        """Return set of explicitly tracked uppercase MACs (from multi-select and manual input)."""
         # 1. From multi-select
         list_macs = self.entry.options.get(CONF_TRACKED_MACS, [])
         combined = parse_mac_list(list_macs)
@@ -155,9 +117,6 @@ class OpenWrtMeshCoordinator(DataUpdateCoordinator[MeshData]):
         # 2. From manual text input
         manual_text = self.entry.options.get(CONF_MANUAL_MACS, "")
         combined.update(parse_mac_list(manual_text))
-
-        # 3. From user profiles
-        combined.update(self.all_user_macs)
 
         return combined
 
@@ -186,6 +145,23 @@ class OpenWrtMeshCoordinator(DataUpdateCoordinator[MeshData]):
         names.update(parsed_text)
 
         return names
+
+    @property
+    def secondary_macs(self) -> set[str]:
+        """Return set of secondary MACs that are merged under a primary target name."""
+        result: set[str] = set()
+        name_groups: dict[str, list[str]] = {}
+        for mac in self.tracked_macs:
+            raw_name = self.device_names.get(mac) or self.get_device_hint(mac).get("name") or f"Device {mac[-8:]}"
+            norm_key = raw_name.strip().lower()
+            if norm_key not in name_groups:
+                name_groups[norm_key] = []
+            name_groups[norm_key].append(mac)
+
+        for group in name_groups.values():
+            if len(group) > 1:
+                result.update(group[1:])
+        return result
 
     @property
     def roaming_grace_period(self) -> int:
@@ -247,7 +223,7 @@ class OpenWrtMeshCoordinator(DataUpdateCoordinator[MeshData]):
         return norm in self.tracked_macs
 
     async def _async_update_data(self) -> MeshData:
-        """Fetch clients from all mesh nodes concurrently, resolve roaming, and aggregate user profiles."""
+        """Fetch clients from all mesh nodes concurrently, resolve roaming, and auto-merge MACs with identical names."""
         now = dt_util.now()
 
         # Step 1: Poll all mesh nodes in parallel with isolated error handling
@@ -303,202 +279,131 @@ class OpenWrtMeshCoordinator(DataUpdateCoordinator[MeshData]):
                         "last_seen": now,
                     }
 
-        # Step 3: Resolve active devices and detect roaming
+        # Step 3: Group tracked MACs by friendly name (case-insensitive auto-merge for 2.4 + 5 GHz)
+        name_groups: dict[str, list[str]] = {}
+        for mac in self.tracked_macs:
+            hint = self.get_device_hint(mac)
+            raw_name = self.device_names.get(mac) or hint.get("name") or f"Device {mac[-8:]}"
+            norm_key = raw_name.strip().lower()
+            if norm_key not in name_groups:
+                name_groups[norm_key] = []
+            name_groups[norm_key].append(mac)
+
+        primary_macs: set[str] = set()
+        grace_delta = timedelta(seconds=self.roaming_grace_period)
         newly_seen_macs: list[str] = []
 
-        if self.tracking_mode == TRACK_MODE_SELECTED:
-            # Also ensure all tracked_macs exist in self._devices even if offline
-            for tm in self.tracked_macs:
-                if tm not in self._devices:
-                    friendly_name = self.device_names.get(tm) or f"Device {tm[-8:]}"
-                    self._devices[tm] = DeviceState(
-                        mac=tm,
-                        name=friendly_name,
-                        is_home=False,
-                        connected_ap=None,
-                        signal=None,
-                        last_seen=now,
-                    )
-                    newly_seen_macs.append(tm)
+        # Step 4: Process each target group
+        for norm_name_key, group_macs in name_groups.items():
+            primary_mac = group_macs[0]
+            primary_macs.add(primary_mac)
 
-        for mac, sightings in current_active_clients.items():
-            # If client is visible on multiple nodes during roaming, select node with highest signal
-            best_sighting = max(sightings, key=lambda x: x.get("signal", -100))
-            ap_name = best_sighting.get("node_name")
-            signal = best_sighting.get("signal")
-            ssid = best_sighting.get("ssid")
-            bssid = best_sighting.get("bssid")
-            interface = best_sighting.get("interface")
+            display_name = self.device_names.get(primary_mac) or self.get_device_hint(primary_mac).get("name") or f"Device {primary_mac[-8:]}"
 
-            # Check if this MAC should be tracked as a device
-            if not self.is_device_tracked(mac):
-                continue
-
-            hint = self.get_device_hint(mac)
-            friendly_name = self.device_names.get(mac) or hint.get("name") or self._discovered_info.get(mac, {}).get("hostname") or f"Device {mac[-8:]}"
-            ip = hint.get("ip") or self._discovered_info.get(mac, {}).get("ip")
-
-            if mac not in self._devices:
-                self._devices[mac] = DeviceState(
-                    mac=mac,
-                    name=friendly_name,
-                    is_home=True,
-                    connected_ap=ap_name,
-                    signal=signal,
-                    last_seen=now,
-                    ip_address=ip,
-                    ssid=ssid,
-                    bssid=bssid,
-                    interface=interface,
-                )
-                newly_seen_macs.append(mac)
-            else:
-                dev = self._devices[mac]
-                # Check for roaming transition
-                if dev.connected_ap != ap_name and dev.is_home:
-                    _LOGGER.info("Device %s roamed from %s to %s (RSSI: %s dBm)", mac, dev.connected_ap, ap_name, signal)
-                dev.is_home = True
-                dev.connected_ap = ap_name
-                dev.signal = signal
-                dev.last_seen = now
-                dev.ip_address = ip or dev.ip_address
-                dev.ssid = ssid
-                dev.bssid = bssid
-                dev.interface = interface
-                dev.name = friendly_name
-
-        # Step 4: Handle devices not seen in this poll (Grace Period Anti-Flapping)
-        grace_delta = timedelta(seconds=self.roaming_grace_period)
-
-        for mac, dev in self._devices.items():
-            if mac not in current_active_clients:
-                time_since_seen = now - dev.last_seen
-                if time_since_seen < grace_delta and dev.is_home:
-                    # Still in grace period: keep state as HOME to prevent false away triggers
-                    _LOGGER.debug(
-                        "Device %s not seen, in grace period (%ss / %ss)",
-                        mac,
-                        int(time_since_seen.total_seconds()),
-                        self.roaming_grace_period,
-                    )
-                else:
-                    if dev.is_home:
-                        _LOGGER.info(
-                            "Device %s offline after grace period (%ss)",
-                            mac,
-                            self.roaming_grace_period,
-                        )
-                    dev.is_home = False
-                    dev.connected_ap = None
-                    dev.signal = None
-
-        # Step 5: Resolve User Profiles (multi-device aggregation)
-        for user_cfg in self.users_config:
-            raw_id = user_cfg.get(CONF_USER_ID)
-            raw_name = user_cfg.get(CONF_USER_NAME, "User")
-            user_id = raw_id or slugify_user_id(raw_name)
-            user_name = raw_name
-            user_macs = [normalize_mac(m) for m in user_cfg.get(CONF_USER_MACS, []) if normalize_mac(m)]
-
-            # Collect active sightings across all MACs assigned to this user
-            active_sightings: list[dict[str, Any]] = []
-            for umac in user_macs:
-                if umac in current_active_clients:
-                    for s in current_active_clients[umac]:
+            # Collect all active sightings across all MACs in this group
+            active_group_sightings: list[dict[str, Any]] = []
+            for m in group_macs:
+                if m in current_active_clients:
+                    for s in current_active_clients[m]:
                         entry_copy = dict(s)
-                        entry_copy["mac"] = umac
-                        active_sightings.append(entry_copy)
+                        entry_copy["mac"] = m
+                        active_group_sightings.append(entry_copy)
 
-            if active_sightings:
-                # User has at least one active Wi-Fi connection: pick the one with highest signal
-                best = max(active_sightings, key=lambda x: x.get("signal", -100))
-                active_mac = best.get("mac")
+            if active_group_sightings:
+                # Target is connected via at least one band/MAC! Pick best signal
+                best = max(active_group_sightings, key=lambda x: x.get("signal", -100))
+                active_mac = best["mac"]
                 ap_name = best.get("node_name")
                 signal = best.get("signal")
                 ssid = best.get("ssid")
                 bssid = best.get("bssid")
                 interface = best.get("interface")
-                hint = self.get_device_hint(active_mac) if active_mac else {}
-                ip = hint.get("ip") or (self._discovered_info.get(active_mac, {}).get("ip") if active_mac else None)
+                hint = self.get_device_hint(active_mac)
+                ip = hint.get("ip") or self._discovered_info.get(active_mac, {}).get("ip")
 
-                if user_id not in self._users:
-                    self._users[user_id] = UserState(
-                        user_id=user_id,
-                        name=user_name,
-                        macs=user_macs,
+                if primary_mac not in self._devices:
+                    self._devices[primary_mac] = DeviceState(
+                        mac=primary_mac,
+                        name=display_name,
                         is_home=True,
                         connected_ap=ap_name,
                         signal=signal,
                         last_seen=now,
                         active_mac=active_mac,
+                        mac_addresses=group_macs,
                         ip_address=ip,
                         ssid=ssid,
                         bssid=bssid,
                         interface=interface,
                     )
+                    newly_seen_macs.append(primary_mac)
                 else:
-                    u_state = self._users[user_id]
-                    if u_state.connected_ap != ap_name and u_state.is_home:
+                    dev = self._devices[primary_mac]
+                    if dev.connected_ap != ap_name and dev.is_home:
                         _LOGGER.info(
-                            "User %s roamed from %s to %s (active MAC: %s, RSSI: %s dBm)",
-                            user_name,
-                            u_state.connected_ap,
+                            "Target '%s' roamed from %s to %s (active MAC: %s, RSSI: %s dBm)",
+                            display_name,
+                            dev.connected_ap,
                             ap_name,
                             active_mac,
                             signal,
                         )
-                    u_state.name = user_name
-                    u_state.macs = user_macs
-                    u_state.is_home = True
-                    u_state.connected_ap = ap_name
-                    u_state.signal = signal
-                    u_state.last_seen = now
-                    u_state.active_mac = active_mac
-                    u_state.ip_address = ip or u_state.ip_address
-                    u_state.ssid = ssid
-                    u_state.bssid = bssid
-                    u_state.interface = interface
+                    dev.name = display_name
+                    dev.is_home = True
+                    dev.connected_ap = ap_name
+                    dev.signal = signal
+                    dev.last_seen = now
+                    dev.active_mac = active_mac
+                    dev.mac_addresses = group_macs
+                    dev.ip_address = ip or dev.ip_address
+                    dev.ssid = ssid
+                    dev.bssid = bssid
+                    dev.interface = interface
             else:
-                # No MAC active in this poll - apply grace period to user
-                if user_id in self._users:
-                    u_state = self._users[user_id]
-                    u_state.name = user_name
-                    u_state.macs = user_macs
-                    time_since_seen = now - u_state.last_seen
-                    if time_since_seen < grace_delta and u_state.is_home:
+                # Target not active in this poll - apply grace period to group
+                if primary_mac in self._devices:
+                    dev = self._devices[primary_mac]
+                    dev.name = display_name
+                    dev.mac_addresses = group_macs
+                    time_since_seen = now - dev.last_seen
+                    if time_since_seen < grace_delta and dev.is_home:
                         _LOGGER.debug(
-                            "User %s not seen, in grace period (%ss / %ss)",
-                            user_name,
+                            "Target '%s' not seen, in grace period (%ss / %ss)",
+                            display_name,
                             int(time_since_seen.total_seconds()),
                             self.roaming_grace_period,
                         )
                     else:
-                        if u_state.is_home:
-                            _LOGGER.info("User %s offline after grace period (%ss)", user_name, self.roaming_grace_period)
-                        u_state.is_home = False
-                        u_state.connected_ap = None
-                        u_state.signal = None
-                        u_state.active_mac = None
+                        if dev.is_home:
+                            _LOGGER.info(
+                                "Target '%s' offline after grace period (%ss)",
+                                display_name,
+                                self.roaming_grace_period,
+                            )
+                        dev.is_home = False
+                        dev.connected_ap = None
+                        dev.signal = None
+                        dev.active_mac = None
                 else:
-                    self._users[user_id] = UserState(
-                        user_id=user_id,
-                        name=user_name,
-                        macs=user_macs,
+                    self._devices[primary_mac] = DeviceState(
+                        mac=primary_mac,
+                        name=display_name,
                         is_home=False,
                         connected_ap=None,
                         signal=None,
                         last_seen=now,
+                        active_mac=None,
+                        mac_addresses=group_macs,
                     )
+                    newly_seen_macs.append(primary_mac)
 
-        # Clean up removed user profiles
-        valid_user_ids = {u.get(CONF_USER_ID) or slugify_user_id(u.get(CONF_USER_NAME, "user")) for u in self.users_config}
-        for uid in list(self._users.keys()):
-            if uid not in valid_user_ids:
-                self._users.pop(uid, None)
+            # Ensure secondary MACs in this group are not duplicated as standalone devices
+            for secondary_m in group_macs[1:]:
+                self._devices.pop(secondary_m, None)
 
-        # Step 6: Prune non-tracked MACs from memory
+        # Step 5: Prune obsolete/untracked MACs from coordinator memory
         if self.tracking_mode == TRACK_MODE_SELECTED:
-            untracked = [m for m in self._devices if not self.is_device_tracked(m)]
+            untracked = [m for m in list(self._devices.keys()) if m not in primary_macs]
             for m in untracked:
                 self._devices.pop(m, None)
 
@@ -508,7 +413,6 @@ class OpenWrtMeshCoordinator(DataUpdateCoordinator[MeshData]):
 
         return MeshData(
             devices=dict(self._devices),
-            users=dict(self._users),
             nodes=dict(self._nodes),
             total_clients=total_mesh_clients,
         )

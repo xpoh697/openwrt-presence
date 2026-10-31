@@ -40,10 +40,6 @@ from .const import (
     CONF_TRACKED_MACS,
     CONF_TRACKING_MODE,
     CONF_USERNAME,
-    CONF_USERS,
-    CONF_USER_ID,
-    CONF_USER_MACS,
-    CONF_USER_NAME,
     CONF_VERIFY_SSL,
     DEFAULT_POLL_INTERVAL,
     DEFAULT_PORT,
@@ -56,7 +52,6 @@ from .const import (
     TRACK_MODE_SELECTED,
     normalize_mac,
     parse_mac_list,
-    slugify_user_id,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -165,7 +160,6 @@ class OpenWrtMeshConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_TRACKED_MACS: [],
                     CONF_MANUAL_MACS: "",
                     CONF_DEVICE_NAMES: {},
-                    CONF_USERS: [],
                 },
             )
 
@@ -190,7 +184,7 @@ class OpenWrtMeshConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options flow for OpenWrt Mesh Presence with User profiles, AP management, and device tracking."""
+    """Handle options flow for OpenWrt Mesh Presence with auto-merging of multiple MACs per person."""
 
     def __init__(self) -> None:
         """Initialize options flow handler."""
@@ -199,231 +193,13 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
         self._target_macs: list[str] = []
         self._field_to_mac: dict[str, str] = {}
         self._selected_router_idx: int | None = None
-        self._selected_user_idx: int | None = None
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Main options menu: Users vs Devices vs Routers."""
+        """Main options menu: Devices vs Routers."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["users", "devices", "routers"],
+            menu_options=["devices", "routers"],
         )
-
-    # ------------------------------------------------------------------
-    # USER PROFILES MANAGEMENT (MULTI-DEVICE / 2.4 + 5 GHz AGGREGATION)
-    # ------------------------------------------------------------------
-
-    async def async_step_users(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Users management submenu."""
-        return self.async_show_menu(
-            step_id="users",
-            menu_options=["user_add", "user_edit", "user_remove"],
-        )
-
-    async def async_step_user_add(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Add a new user profile with multiple MAC addresses."""
-        errors: dict[str, str] = {}
-        current_options = dict(self.config_entry.options or {})
-        current_users = list(current_options.get(CONF_USERS, []))
-
-        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
-        discovered_dict: dict[str, str] = {}
-        if coordinator:
-            discovered_dict = coordinator.get_discovered_devices()
-
-        if user_input is not None:
-            name = str(user_input.get(CONF_USER_NAME, "")).strip()
-            selected_macs = [normalize_mac(m) for m in user_input.get(CONF_USER_MACS, []) if normalize_mac(m)]
-            manual_text = str(user_input.get(CONF_MANUAL_MACS, "") or "")
-            manual_set = parse_mac_list(manual_text)
-            all_user_macs = sorted(set(selected_macs) | manual_set)
-
-            if not name:
-                errors[CONF_USER_NAME] = "name_required"
-            elif any(u.get(CONF_USER_NAME, "").lower() == name.lower() for u in current_users):
-                errors[CONF_USER_NAME] = "user_name_exists"
-            elif not all_user_macs:
-                errors["base"] = "no_macs"
-            else:
-                user_id = slugify_user_id(name)
-                # Ensure user_id uniqueness
-                existing_ids = {u.get(CONF_USER_ID) for u in current_users}
-                candidate_id = user_id
-                suffix = 1
-                while candidate_id in existing_ids:
-                    suffix += 1
-                    candidate_id = f"{user_id}_{suffix}"
-
-                new_user = {
-                    CONF_USER_ID: candidate_id,
-                    CONF_USER_NAME: name,
-                    CONF_USER_MACS: all_user_macs,
-                }
-                new_users = current_users + [new_user]
-                new_options = dict(current_options)
-                new_options[CONF_USERS] = new_users
-
-                return self.async_create_entry(title="", data=new_options)
-
-        select_options = [
-            SelectOptionDict(value=val, label=lbl)
-            for val, lbl in discovered_dict.items()
-        ]
-
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_USER_NAME): cv.string,
-                vol.Optional(CONF_USER_MACS, default=[]): SelectSelector(
-                    SelectSelectorConfig(options=select_options, multiple=True, mode=SelectSelectorMode.DROPDOWN)
-                ),
-                vol.Optional(CONF_MANUAL_MACS, default=""): TextSelector(TextSelectorConfig(multiline=True)),
-            }
-        )
-
-        return self.async_show_form(step_id="user_add", data_schema=schema, errors=errors)
-
-    async def async_step_user_edit(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Select a user to edit."""
-        current_users = list(self.config_entry.options.get(CONF_USERS, []))
-        if not current_users:
-            return self.async_abort(reason="no_users")
-
-        if user_input is not None:
-            self._selected_user_idx = int(user_input["user_idx"])
-            return await self.async_step_user_edit_details()
-
-        select_options = [
-            SelectOptionDict(
-                value=str(i),
-                label=f"{u.get(CONF_USER_NAME, 'User')} ({len(u.get(CONF_USER_MACS, []))} MAC)",
-            )
-            for i, u in enumerate(current_users)
-        ]
-
-        schema = vol.Schema(
-            {
-                vol.Required("user_idx"): SelectSelector(
-                    SelectSelectorConfig(options=select_options, mode=SelectSelectorMode.DROPDOWN)
-                )
-            }
-        )
-
-        return self.async_show_form(step_id="user_edit", data_schema=schema)
-
-    async def async_step_user_edit_details(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Edit parameters for the selected user profile."""
-        current_options = dict(self.config_entry.options or {})
-        current_users = list(current_options.get(CONF_USERS, []))
-        idx = self._selected_user_idx
-
-        if idx is None or idx < 0 or idx >= len(current_users):
-            return await self.async_step_users()
-
-        target_user = current_users[idx]
-        errors: dict[str, str] = {}
-
-        coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
-        discovered_dict: dict[str, str] = {}
-        if coordinator:
-            discovered_dict = coordinator.get_discovered_devices()
-
-        if user_input is not None:
-            name = str(user_input.get(CONF_USER_NAME, "")).strip()
-            selected_macs = [normalize_mac(m) for m in user_input.get(CONF_USER_MACS, []) if normalize_mac(m)]
-            manual_text = str(user_input.get(CONF_MANUAL_MACS, "") or "")
-            manual_set = parse_mac_list(manual_text)
-            all_user_macs = sorted(set(selected_macs) | manual_set)
-
-            other_users = [u for i, u in enumerate(current_users) if i != idx]
-            if not name:
-                errors[CONF_USER_NAME] = "name_required"
-            elif any(u.get(CONF_USER_NAME, "").lower() == name.lower() for u in other_users):
-                errors[CONF_USER_NAME] = "user_name_exists"
-            elif not all_user_macs:
-                errors["base"] = "no_macs"
-            else:
-                updated_user = dict(target_user)
-                updated_user[CONF_USER_NAME] = name
-                updated_user[CONF_USER_MACS] = all_user_macs
-
-                new_users = list(current_users)
-                new_users[idx] = updated_user
-                new_options = dict(current_options)
-                new_options[CONF_USERS] = new_users
-
-                return self.async_create_entry(title="", data=new_options)
-
-        user_macs = target_user.get(CONF_USER_MACS, [])
-        options_dict = dict(discovered_dict)
-        for mac in user_macs:
-            if mac not in options_dict:
-                options_dict[mac] = mac
-
-        select_options = [
-            SelectOptionDict(value=val, label=lbl)
-            for val, lbl in options_dict.items()
-        ]
-
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_USER_NAME, default=target_user.get(CONF_USER_NAME, "")): cv.string,
-                vol.Optional(CONF_USER_MACS, default=user_macs): SelectSelector(
-                    SelectSelectorConfig(options=select_options, multiple=True, mode=SelectSelectorMode.DROPDOWN)
-                ),
-                vol.Optional(CONF_MANUAL_MACS, default=""): TextSelector(TextSelectorConfig(multiline=True)),
-            }
-        )
-
-        return self.async_show_form(step_id="user_edit_details", data_schema=schema, errors=errors)
-
-    async def async_step_user_remove(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Remove a user profile and clean up associated entities."""
-        current_options = dict(self.config_entry.options or {})
-        current_users = list(current_options.get(CONF_USERS, []))
-
-        if not current_users:
-            return self.async_abort(reason="no_users")
-
-        if user_input is not None:
-            idx = int(user_input["user_idx"])
-            removed_user = current_users.pop(idx)
-            user_id = removed_user.get(CONF_USER_ID)
-
-            # Clean up entity registry for the removed user's entities
-            ent_reg = er.async_get(self.hass)
-            entries = er.async_entries_for_config_entry(ent_reg, self.config_entry.entry_id)
-            for reg_entry in entries:
-                uid = reg_entry.unique_id
-                if (
-                    uid.startswith(f"openwrt_user_tracker_{user_id}_")
-                    or uid.startswith(f"openwrt_user_ap_{user_id}_")
-                    or uid.startswith(f"openwrt_user_rssi_{user_id}_")
-                    or uid.startswith(f"openwrt_user_seen_{user_id}_")
-                ):
-                    _LOGGER.info("Removing obsolete entity for deleted user %s: %s", user_id, reg_entry.entity_id)
-                    ent_reg.async_remove(reg_entry.entity_id)
-
-            new_options = dict(current_options)
-            new_options[CONF_USERS] = current_users
-            return self.async_create_entry(title="", data=new_options)
-
-        select_options = [
-            SelectOptionDict(value=str(i), label=f"{u.get(CONF_USER_NAME, 'User')} ({u.get(CONF_USER_ID)})")
-            for i, u in enumerate(current_users)
-        ]
-
-        schema = vol.Schema(
-            {
-                vol.Required("user_idx"): SelectSelector(
-                    SelectSelectorConfig(options=select_options, mode=SelectSelectorMode.DROPDOWN)
-                )
-            }
-        )
-
-        return self.async_show_form(step_id="user_remove", data_schema=schema)
-
-    # ------------------------------------------------------------------
-    # INDIVIDUAL DEVICES & TIMINGS
-    # ------------------------------------------------------------------
 
     async def async_step_devices(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Step 1: Select tracked devices from discovered list, enter manual MACs, set intervals."""
@@ -446,7 +222,7 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
             self._options[CONF_TRACKED_MACS] = selected_macs
             self._target_macs = all_target_macs
 
-            # If there are devices to rename, proceed to Step 2
+            # If there are devices to name/group, proceed to Step 2
             if all_target_macs:
                 return await self.async_step_device_names()
 
@@ -513,7 +289,7 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(step_id="devices", data_schema=schema)
 
     async def async_step_device_names(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Step 2: Assign friendly names for each selected device with full network context."""
+        """Step 2: Assign friendly names. Giving identical names automatically merges MACs into one person."""
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
         current_options = self.config_entry.options or {}
         existing_names: dict[str, str] = dict(current_options.get(CONF_DEVICE_NAMES, {}))
@@ -576,7 +352,9 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="device_names",
             data_schema=schema,
-            description_placeholders={"device_summary": "\n".join(summary_items)},
+            description_placeholders={
+                "device_summary": "\n".join(summary_items),
+            },
         )
 
     # ------------------------------------------------------------------
@@ -696,8 +474,8 @@ class OpenWrtMeshOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Required(CONF_PORT, default=router.get(CONF_PORT, DEFAULT_PORT)): cv.port,
                 vol.Required(CONF_USERNAME, default=router.get(CONF_USERNAME, DEFAULT_USERNAME)): cv.string,
                 vol.Optional(CONF_PASSWORD, default=router.get(CONF_PASSWORD, "")): cv.string,
-                vol.Optional(CONF_SSL, default=router.get(CONF_SSL, DEFAULT_SSL)): cv.boolean,
-                vol.Optional(CONF_VERIFY_SSL, default=router.get(CONF_VERIFY_SSL, DEFAULT_VERIFY_SSL)): cv.boolean,
+                vol.Optional(CONF_SSL, default=DEFAULT_SSL): cv.boolean,
+                vol.Optional(CONF_VERIFY_SSL, default=DEFAULT_VERIFY_SSL): cv.boolean,
             }
         )
 
